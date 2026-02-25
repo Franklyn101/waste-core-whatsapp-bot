@@ -1,0 +1,125 @@
+"use client"
+
+import { useState, useEffect } from "react"
+import { DashboardSidebar } from "@/components/dashboard-sidebar"
+import { DashboardHeader } from "@/components/dashboard-header"
+import { DashboardStatsCards } from "@/components/dashboard-stats"
+import { PickupRequestsTable } from "@/components/pickup-requests-table"
+import { UsersTable } from "@/components/users-table"
+import { PaymentReceiptsGallery } from "@/components/payment-receipts-gallery"
+import { AnalyticsCharts } from "@/components/analytics-charts"
+import { LocalTestingPanel } from "@/components/local-testing-panel"
+import { FirebaseService } from "@/lib/firebase-service"
+import type { DashboardStats } from "@/lib/types"
+
+export default function DashboardPage() {
+  const [activeSection, setActiveSection] = useState("overview")
+  const [searchQuery, setSearchQuery] = useState("")
+  const [stats, setStats] = useState<DashboardStats>({
+    totalRequests: 0,
+    pendingRequests: 0,
+    completedRequests: 0,
+    todayRequests: 0,
+  })
+  const [isLoading, setIsLoading] = useState(true)
+  const [lastUpdated, setLastUpdated] = useState<Date>()
+
+  useEffect(() => {
+    setIsLoading(true)
+    console.log("Dashboard mounted")
+
+    const unsubscribe = FirebaseService.subscribeToDashboardStats((newStats) => {
+      setStats(newStats)
+      setIsLoading(false)
+      setLastUpdated(new Date())
+    })
+
+    return () => {
+      unsubscribe()
+    }
+  }, [])
+
+  const renderMainContent = () => {
+    switch (activeSection) {
+      case "overview":
+        return (
+          <div className="space-y-6">
+            <div>
+              <h1 className="text-3xl font-bold text-balance">Dashboard Overview</h1>
+              <p className="text-muted-foreground mt-2">
+                Monitor your waste collection service performance and manage requests.
+              </p>
+            </div>
+            <DashboardStatsCards stats={stats} isLoading={isLoading} lastUpdated={lastUpdated} />
+            {process.env.NODE_ENV === "development" && (
+              <div>
+                <h2 className="text-xl font-semibold mb-4">Development Tools</h2>
+                <LocalTestingPanel />
+              </div>
+            )}
+            <AnalyticsCharts />
+          </div>
+        )
+      case "pickup-requests":
+        return (
+          <div className="space-y-6">
+            <div>
+              <h1 className="text-3xl font-bold text-balance">Pickup Requests</h1>
+              <p className="text-muted-foreground mt-2">
+                Manage and track all waste collection requests from WhatsApp.
+              </p>
+            </div>
+            <PickupRequestsTable searchQuery={searchQuery} />
+          </div>
+        )
+      case "users":
+        return (
+          <div className="space-y-6">
+            <div>
+              <h1 className="text-3xl font-bold text-balance">User Data</h1>
+              <p className="text-muted-foreground mt-2">View customer information and request history.</p>
+            </div>
+            <UsersTable searchQuery={searchQuery} />
+          </div>
+        )
+      case "payments":
+        return (
+          <div className="space-y-6">
+            <div>
+              <h1 className="text-3xl font-bold text-balance">Payment Receipts</h1>
+              <p className="text-muted-foreground mt-2">View and manage uploaded payment receipt images.</p>
+            </div>
+            <PaymentReceiptsGallery searchQuery={searchQuery} />
+          </div>
+        )
+      case "analytics":
+        return (
+          <div className="space-y-6">
+            <div>
+              <h1 className="text-3xl font-bold text-balance">Service Analytics</h1>
+              <p className="text-muted-foreground mt-2">Analyze service performance and trends over time.</p>
+            </div>
+            <AnalyticsCharts />
+          </div>
+        )
+      default:
+        return <div>Section not found</div>
+    }
+  }
+
+  return (
+    <div className="flex h-screen bg-background">
+      {/* Sidebar */}
+      <DashboardSidebar activeSection={activeSection} onSectionChange={setActiveSection} />
+
+      {/* Main Content */}
+      <div className="flex-1 flex flex-col overflow-hidden">
+        {/* Header */}
+        <DashboardHeader searchQuery={searchQuery} onSearchChange={setSearchQuery} />
+
+        {/* Main Content Area */}
+        <main className="flex-1 overflow-y-auto p-6">{renderMainContent()}</main>
+      </div>
+    </div>
+  )
+}
