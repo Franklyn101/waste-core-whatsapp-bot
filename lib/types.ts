@@ -1,4 +1,6 @@
 export interface WasteRequest {
+  plan(plan: any): string | undefined;
+  startDate: string;
   customerPhone(customerPhone: any, arg1: { phoneNumber: any; name: any; address: string; totalRequests: number; lastRequestDate: Date }): unknown
   id: string
   customerName: string

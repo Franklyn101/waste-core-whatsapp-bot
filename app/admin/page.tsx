@@ -11,6 +11,11 @@ import { AnalyticsCharts } from "@/components/analytics-charts"
 import { LocalTestingPanel } from "@/components/local-testing-panel"
 import { FirebaseService } from "@/lib/firebase-service"
 import type { DashboardStats } from "@/lib/types"
+import { InstantPickupTable } from "@/components/instant-pickup"
+import  {WasteBagOrdersTable }  from "@/components/waste-bag-orders"
+import { UpgradeRequestsTable } from "@/components/upgrade-request-table"
+import { SupportTicketsTable } from "@/components/support-ticket-table"
+
 
 export default function DashboardPage() {
   const [activeSection, setActiveSection] = useState("overview")
@@ -82,6 +87,62 @@ export default function DashboardPage() {
             <UsersTable searchQuery={searchQuery} />
           </div>
         )
+
+
+        case "instant-pickups":
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-3xl font-bold text-balance">Instant Pickups</h1>
+        <p className="text-muted-foreground mt-2">
+          Manage and track all instant pickup requests from WhatsApp.
+        </p>
+      </div>
+      <InstantPickupTable searchQuery={searchQuery} />
+    </div>
+  )
+  case "waste-bag-orders":
+    return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-3xl font-bold text-balance">Waste Bag Orders</h1>
+        <p className="text-muted-foreground mt-2">
+          Manage and track all waste bag orders from WhatsApp.
+        </p>
+      </div>
+      <WasteBagOrdersTable searchQuery={searchQuery} />
+    </div>
+  )
+
+      case "upgrade-plans":
+      return (
+        <div className="space-y-6">
+      <div>
+        <h1 className="text-3xl font-bold text-balance">Upgrade Plans</h1>
+        <p className="text-muted-foreground mt-2">
+          Manage and track all upgrade plan requests from WhatsApp.
+        </p>
+      </div>
+      <UpgradeRequestsTable searchQuery={searchQuery} />
+      </div>
+
+      )
+       case "support-tickets":
+      return (
+        <div className="space-y-6">
+      <div>
+        <h1 className="text-3xl font-bold text-balance">Support Tickets</h1>
+        <p className="text-muted-foreground mt-2">
+          Manage and track all support tickets from WhatsApp.
+        </p>
+      </div>
+      <SupportTicketsTable searchQuery={searchQuery} />
+      </div>
+
+      )
+
+
+
       case "payments":
         return (
           <div className="space-y-6">

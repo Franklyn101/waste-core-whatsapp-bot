@@ -3,7 +3,7 @@
 import { useState } from "react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
-import { LayoutDashboard, Truck, Users, Receipt, BarChart3, Menu, X } from "lucide-react"
+import { LayoutDashboard, Truck, Ticket, Rocket, Trash, Zap, Users, Receipt, BarChart3, Menu, X } from "lucide-react"
 
 interface SidebarProps {
   activeSection: string
@@ -27,9 +27,32 @@ const navigationItems = [
     icon: Users,
   },
   {
+    id: "instant-pickups",
+    label: "Instant Pickups",
+    icon: Zap,
+  },
+
+  {
+    id: "waste-bag-orders",
+    label: "Waste Bag Orders",
+    icon:  Trash,
+  },
+  {
+    id: "upgrade-plans",
+    label: "Upgrade Plans",
+    icon: Rocket,
+  },
+
+  {
     id: "payments",
     label: "Payment Receipts",
     icon: Receipt,
+  },
+  {
+    id: "support-tickets",
+    label: "Support Tickets",
+    icon: Ticket,
+
   },
   {
     id: "analytics",
