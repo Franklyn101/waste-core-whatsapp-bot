@@ -39,7 +39,9 @@ try {
 // ================= PRICING MAP =================
 const SERVICE_PRICES = {
   instant: 2000,
-  monthly: 10000,
+  weekly_1: 1250,
+  weekly_2: 2500,
+  weekly_3: 3750,
   upgrade_basic: 12000,
   upgrade_standard: 20000,
   upgrade_premium: 35000,
@@ -47,6 +49,12 @@ const SERVICE_PRICES = {
   wasteBags_medium: 900,
   wasteBags_large: 1500,
   support: 0,
+}
+
+const WEEKLY_PLAN_LABELS = {
+  weekly_1: "1 pickup/week",
+  weekly_2: "2 pickups/week",
+  weekly_3: "3 pickups/week",
 }
 
 // ================= FLAXXA WAPI =================
@@ -193,12 +201,12 @@ function setupStatusListeners() {
 // ================= HELPERS =================
 function routeAfterService(serviceType) {
   switch (serviceType) {
-    case "instant":
-    case "monthly":   return "pickup_address"
-    case "upgrade":   return "upgrade_choose"
-    case "wasteBags": return "bags_choose"
-    case "support":   return "support_category"
-    default:          return "pickup_address"
+    case "instant":    return "pickup_address"
+    case "weekly":     return "weekly_plan_select"
+    case "upgrade":    return "upgrade_choose"
+    case "wasteBags":  return "bags_choose"
+    case "support":    return "support_category"
+    default:           return "pickup_address"
   }
 }
 
@@ -414,7 +422,7 @@ nextApp.prepare().then(() => {
           const activeDoc = !activeInstant.empty ? activeInstant.docs[0] : activeMonthly.docs[0]
           const data = activeDoc.data()
           await send(
-            `Active Request Found\n\nService: ${data.serviceType || "monthly"}\nPickup Date: ${data.pickupDate}\nStatus: ${data.status}\n\n` +
+            `Active Request Found\n\nService: ${WEEKLY_PLAN_LABELS[data.serviceType] || data.serviceType}\nPickup Date: ${data.pickupDate}\nStatus: ${data.status}\n\n` +
             `You can still:\n1 - Book another service\n2 - Order Waste Bags\n3 - Speak to Support\n\nReply with a number or type cancel to restart.`
           )
           session.step = "active_menu"
@@ -456,7 +464,7 @@ nextApp.prepare().then(() => {
             session.step = "1"
           } else if (msg === "3") {
             session.data.serviceType = "support"
-            await send("What is your business name or full name?")
+            await send("What is your full name?")
             session.step = "1"
           } else {
             await send("Please reply with 1, 2, or 3.")
@@ -468,7 +476,7 @@ nextApp.prepare().then(() => {
           session.data.name = msg.substring(0, 100)
           if (!session.data.serviceType) {
             await send(
-              `Choose service:\n1 - Instant Pickup (NGN 2,000)\n2 - Monthly Subscription (NGN 10,000)\n3 - Upgrade Plan\n4 - Order Waste Bags\n5 - Speak to Support`
+              `Choose service:\n1 - Instant Pickup (NGN 2,000)\n2 - Weekly Pickup\n3 - Upgrade Plan\n4 - Order Waste Bags\n5 - Speak to Support`
             )
             session.step = "1.5"
           } else {
@@ -492,7 +500,7 @@ nextApp.prepare().then(() => {
 
         case "1.5":
           if      (msg === "1") session.data.serviceType = "instant"
-          else if (msg === "2") session.data.serviceType = "monthly"
+          else if (msg === "2") session.data.serviceType = "weekly"
           else if (msg === "3") session.data.serviceType = "upgrade"
           else if (msg === "4") session.data.serviceType = "wasteBags"
           else if (msg === "5") session.data.serviceType = "support"
@@ -516,22 +524,38 @@ nextApp.prepare().then(() => {
           }
           break
 
-        // ── INSTANT & MONTHLY PICKUP FLOW ──────────────────────────────────
+        // ── WEEKLY PICKUP PLAN SELECTION ───────────────────────────────────
+        case "weekly_plan_select":
+          await send(`Choose your weekly pickup plan:\n\n1 - 1 pickup/week (NGN 1,250/week)\n2 - 2 pickups/week (NGN 2,500/week)\n3 - 3 pickups/week (NGN 3,750/week)\n\nReply 1, 2, or 3.`)
+          session.step = "weekly_plan_choose"
+          break
+
+        case "weekly_plan_choose":
+          if      (msg === "1") session.data.weeklyPlan = "weekly_1"
+          else if (msg === "2") session.data.weeklyPlan = "weekly_2"
+          else if (msg === "3") session.data.weeklyPlan = "weekly_3"
+          else { await send("Please reply 1, 2, or 3."); break }
+          session.data.serviceType = session.data.weeklyPlan
+          await send("Your pickup address?")
+          session.step = "pickup_address"
+          break
+
+        // ── INSTANT & WEEKLY PICKUP FLOW ───────────────────────────────────
         case "pickup_address":
           session.data.address = msg.substring(0, 300)
-          await send("Waste type?\n\n1 - Organic\n2 - Plastic\n3 - Metal\n\nOr type the name of your waste.")
+          await send("Waste type?\n\n1 - Organic\n2 - Plastic\n3 - Paper\n4 - Fabric\n\nOr type the name of your waste.")
           session.step = "pickup_waste"
           break
 
         case "pickup_waste":
           session.data.wasteType = msg.substring(0, 100)
-          await send("Pickup date (YYYY-MM-DD)?")
+          await send("Pickup start date (YYYY-MM-DD)?")
           session.step = "pickup_date"
           break
 
         case "pickup_date":
           if (!/^\d{4}-\d{2}-\d{2}$/.test(msg) || isNaN(Date.parse(msg))) {
-            await send("Invalid date. Please use YYYY-MM-DD e.g. 2025-08-20.")
+            await send("Invalid date. Please use YYYY-MM-DD e.g. 2026-03-30.")
             break
           }
           session.data.pickupDate = msg
@@ -546,6 +570,7 @@ nextApp.prepare().then(() => {
           {
             const receiptUrl = await handleReceiptUpload(mediaId, from)
             const col = session.data.serviceType === "instant" ? "instantPickups" : "pickupRequests"
+            const serviceLabel = WEEKLY_PLAN_LABELS[session.data.serviceType] || session.data.serviceType
             await db.collection(col).add({
               customerName: session.data.name,
               customerPhone: from,
@@ -554,12 +579,14 @@ nextApp.prepare().then(() => {
               pickupDate: session.data.pickupDate,
               paymentReceiptUrl: receiptUrl,
               serviceType: session.data.serviceType,
+              serviceLabel,
               status: "pending",
               createdAt: new Date().toISOString(),
               updatedAt: new Date().toISOString(),
             })
+            await send("Confirming Transaction, you will get a notification shortly to confirm your transaction and booking.")
             await send(
-              `Booked! Summary:\n\nService: ${session.data.serviceType}\nAddress: ${session.data.address}\nWaste: ${session.data.wasteType}\nDate: ${session.data.pickupDate}\nPayment received\n\nWe will notify you once a collector is assigned.`
+              `Booked! Summary:\n\nService: ${serviceLabel}\nAddress: ${session.data.address}\nWaste: ${session.data.wasteType}\nDate: ${session.data.pickupDate}\nPayment received\n\nWe will notify you once a collector is assigned.`
             )
           }
           session.step = "done"
@@ -596,7 +623,7 @@ nextApp.prepare().then(() => {
           {
             const amount = SERVICE_PRICES[session.data.serviceType]
             await send(
-              `${session.data.upgradePlan.toUpperCase()} Plan\n\nAmount: NGN ${amount.toLocaleString()}/month\n\nPay to:\nBank: ABC Bank\nAccount Name: WasteCore Services\nAccount Number: 1234567890\n\nUpload your payment receipt to confirm.`
+              `${session.data.upgradePlan.toUpperCase()} Plan\n\nAmount: NGN ${amount.toLocaleString()}/month\n\nPay to:\nBank: Moniepoint\nAccount Name: WasteCore Limited\nAccount Number: 6614999315\n\nUpload your payment receipt to confirm.`
             )
           }
           session.step = "upgrade_payment"
@@ -657,7 +684,7 @@ nextApp.prepare().then(() => {
         case "bags_address":
           session.data.address = msg.substring(0, 300)
           await send(
-            `Order Summary\n\nSize: ${session.data.bagSize.toUpperCase()}\nPacks: ${session.data.bagQuantity}\nAddress: ${session.data.address}\nTotal: NGN ${session.data.bagTotal.toLocaleString()}\n\nPay to:\nBank: ABC Bank\nAccount Name: WasteCore Services\nAccount Number: 1234567890\n\nUpload payment receipt to confirm.`
+            `Order Summary\n\nSize: ${session.data.bagSize.toUpperCase()}\nPacks: ${session.data.bagQuantity}\nAddress: ${session.data.address}\nTotal: NGN ${session.data.bagTotal.toLocaleString()}\n\nPay to:\nBank: Moniepoint\nAccount Name: WasteCore Limited\nAccount Number: 6614999315\n\nUpload payment receipt to confirm.`
           )
           session.step = "bags_payment"
           break

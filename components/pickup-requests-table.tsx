@@ -32,6 +32,23 @@ import { useFilteredRequests } from "@/hooks/use-filtered-data"
 import { FirebaseService } from "@/lib/firebase-service"
 import type { WasteRequest } from "@/lib/types"
 
+// Maps serviceType stored in Firestore to a human-readable label
+const SERVICE_LABELS: Record<string, string> = {
+  instant:   "Instant Pickup",
+  weekly_1:  "1 pickup/week",
+  weekly_2:  "2 pickups/week",
+  weekly_3:  "3 pickups/week",
+  monthly:   "Monthly",          // legacy — kept for old records
+}
+
+function getServiceLabel(request: WasteRequest): string {
+  // Use serviceLabel field if present (new records), fall back to SERVICE_LABELS map
+  return (request as any).serviceLabel
+    || SERVICE_LABELS[request.serviceType]
+    || request.serviceType
+    || "—"
+}
+
 interface PickupRequestsTableProps {
   searchQuery?: string
 }
@@ -47,7 +64,6 @@ export function PickupRequestsTable({ searchQuery = "" }: PickupRequestsTablePro
     searchQuery: searchQuery,
   })
 
-  // Update search query from props
   useEffect(() => {
     setFilters((prev) => ({ ...prev, searchQuery }))
   }, [searchQuery])
@@ -75,13 +91,12 @@ export function PickupRequestsTable({ searchQuery = "" }: PickupRequestsTablePro
   }, [])
 
   const filteredRequests = useFilteredRequests(requests, filters)
-
   const availableStatuses = Array.from(new Set(requests.map((r) => r.status)))
   const availableWasteTypes = Array.from(new Set(requests.map((r) => r.wasteType)))
 
   const getStatusBadge = (status: string) => {
     const variants = {
-      pending: "bg-chart-2/20 text-chart-2 hover:bg-chart-2/30",
+      pending:   "bg-chart-2/20 text-chart-2 hover:bg-chart-2/30",
       confirmed: "bg-chart-1/20 text-chart-1 hover:bg-chart-1/30",
       completed: "bg-chart-3/20 text-chart-3 hover:bg-chart-3/30",
       cancelled: "bg-destructive/20 text-destructive hover:bg-destructive/30",
@@ -89,11 +104,14 @@ export function PickupRequestsTable({ searchQuery = "" }: PickupRequestsTablePro
     return variants[status as keyof typeof variants] || variants.pending
   }
 
+  const getServiceBadge = (serviceType: string) => {
+    if (serviceType === "instant") return "bg-blue-500/20 text-blue-600"
+    if (serviceType?.startsWith("weekly")) return "bg-purple-500/20 text-purple-600"
+    return "bg-muted text-muted-foreground"
+  }
+
   const handleStatusUpdate = async (requestId: string, newStatus: string) => {
-    const success = await FirebaseService.updateRequestStatus(requestId, newStatus)
-    if (success) {
-      // Real-time listener will update automatically
-    }
+    await FirebaseService.updateRequestStatus(requestId, newStatus)
   }
 
   const handleViewReceipt = (url: string | undefined) => {
@@ -104,17 +122,13 @@ export function PickupRequestsTable({ searchQuery = "" }: PickupRequestsTablePro
     return (
       <div className="space-y-6">
         <Card>
-          <CardHeader>
-            <CardTitle>Filters</CardTitle>
-          </CardHeader>
+          <CardHeader><CardTitle>Filters</CardTitle></CardHeader>
           <CardContent>
             <div className="h-32 bg-muted animate-pulse rounded" />
           </CardContent>
         </Card>
         <Card>
-          <CardHeader>
-            <CardTitle>Pickup Requests</CardTitle>
-          </CardHeader>
+          <CardHeader><CardTitle>Pickup Requests</CardTitle></CardHeader>
           <CardContent>
             <div className="space-y-4">
               {[...Array(5)].map((_, i) => (
@@ -164,6 +178,7 @@ export function PickupRequestsTable({ searchQuery = "" }: PickupRequestsTablePro
               <TableRow>
                 <TableHead>Customer</TableHead>
                 <TableHead>Contact</TableHead>
+                <TableHead>Service</TableHead>
                 <TableHead>Address</TableHead>
                 <TableHead>Waste Type</TableHead>
                 <TableHead>Pickup Date</TableHead>
@@ -181,6 +196,11 @@ export function PickupRequestsTable({ searchQuery = "" }: PickupRequestsTablePro
                       <Phone className="w-4 h-4 text-muted-foreground" />
                       <span className="text-sm">{request.customerPhone}</span>
                     </div>
+                  </TableCell>
+                  <TableCell>
+                    <Badge className={getServiceBadge(request.serviceType)}>
+                      {getServiceLabel(request)}
+                    </Badge>
                   </TableCell>
                   <TableCell>
                     <div className="flex items-center gap-2">
