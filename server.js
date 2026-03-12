@@ -212,11 +212,12 @@ function routeAfterService(serviceType) {
 
 function promptForStep(step) {
   switch (step) {
-    case "pickup_address":   return "Your pickup address?"
-    case "upgrade_choose":   return "__show_upgrade_menu__"
-    case "bags_choose":      return "__show_bags_menu__"
-    case "support_category": return "__show_support_menu__"
-    default:                 return "Please continue."
+    case "pickup_address":      return "Your pickup address?"
+    case "weekly_plan_select":  return "__show_weekly_menu__"
+    case "upgrade_choose":      return "__show_upgrade_menu__"
+    case "bags_choose":         return "__show_bags_menu__"
+    case "support_category":    return "__show_support_menu__"
+    default:                    return "Please continue."
   }
 }
 
@@ -497,7 +498,10 @@ nextApp.prepare().then(() => {
             const nextStep = routeAfterService(session.data.serviceType)
             session.step = nextStep
             const prompt = promptForStep(nextStep)
-            if (prompt === "__show_upgrade_menu__") {
+            if (prompt === "__show_weekly_menu__") {
+              await send(`Choose your weekly pickup plan:\n\n1 - 1 pickup/week (NGN 1,250/week)\n2 - 2 pickups/week (NGN 2,500/week)\n3 - 3 pickups/week (NGN 3,750/week)\n\nReply 1, 2, or 3.`)
+              session.step = "weekly_plan_choose"
+            } else if (prompt === "__show_upgrade_menu__") {
               await send(`Available Upgrade Plans\n\n1 - Basic  NGN 12,000/mo\n   Weekly pickup, up to 5 bags\n\n2 - Standard  NGN 20,000/mo\n   3x/week pickup, up to 15 bags, priority support\n\n3 - Premium  NGN 35,000/mo\n   Daily pickup, unlimited bags, dedicated driver, free bags monthly\n\nReply 1, 2, or 3.`)
               session.step = "upgrade_select"
             } else if (prompt === "__show_bags_menu__") {
@@ -523,7 +527,10 @@ nextApp.prepare().then(() => {
             const nextStep = routeAfterService(session.data.serviceType)
             session.step = nextStep
             const prompt = promptForStep(nextStep)
-            if (prompt === "__show_upgrade_menu__") {
+            if (prompt === "__show_weekly_menu__") {
+              await send(`Choose your weekly pickup plan:\n\n1 - 1 pickup/week (NGN 1,250/week)\n2 - 2 pickups/week (NGN 2,500/week)\n3 - 3 pickups/week (NGN 3,750/week)\n\nReply 1, 2, or 3.`)
+              session.step = "weekly_plan_choose"
+            } else if (prompt === "__show_upgrade_menu__") {
               await send(`Available Upgrade Plans\n\n1 - Basic  NGN 12,000/mo\n   Weekly pickup, up to 5 bags\n\n2 - Standard  NGN 20,000/mo\n   3x/week, up to 15 bags, priority support\n\n3 - Premium  NGN 35,000/mo\n   Daily pickup, unlimited bags, dedicated driver, free bags monthly\n\nReply 1, 2, or 3.`)
               session.step = "upgrade_select"
             } else if (prompt === "__show_bags_menu__") {
