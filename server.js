@@ -292,10 +292,11 @@ nextApp.prepare().then(() => {
       const hasImage = msgType === "image"
       const mediaId  = hasImage ? message.image?.id || null : null
 
-      return { from: normalizedFrom, msg: text, hasImage, mediaId }
+      const messageId = message.id || null
+      return { from: normalizedFrom, msg: text, hasImage, mediaId, messageId }
     } catch (e) {
       console.error("extractIncoming error:", e)
-      return { from: "", msg: "", hasImage: false, mediaId: null }
+      return { from: "", msg: "", hasImage: false, mediaId: null, messageId: null }
     }
   }
 
@@ -385,10 +386,23 @@ nextApp.prepare().then(() => {
     // Acknowledge immediately — Flaxxa expects a fast 200 OK
     res.sendStatus(200)
 
-    const { from, msg, hasImage, mediaId } = extractIncoming(req)
+    const { from, msg, hasImage, mediaId, messageId } = extractIncoming(req)
     if (!from) {
       console.warn("Webhook received with no sender phone — ignored.", req.body)
       return
+    }
+
+    // DEDUPLICATION — Flaxxa sometimes sends the same webhook twice.
+    // We store the last processed message ID per user and ignore duplicates.
+    if (messageId) {
+      const dedupRef = db.collection("processedMessages").doc(messageId)
+      const dedupDoc = await dedupRef.get()
+      if (dedupDoc.exists) {
+        console.log(`Duplicate webhook ignored — messageId: ${messageId}`)
+        return
+      }
+      // Mark as processed (auto-expire after 10 minutes via TTL or just leave it)
+      await dedupRef.set({ processedAt: new Date().toISOString(), from })
     }
 
     // GLOBAL CANCEL
