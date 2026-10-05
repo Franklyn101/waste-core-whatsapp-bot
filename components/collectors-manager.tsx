@@ -284,7 +284,7 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
         </div>
       )}
 
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+      <div className="grid grid-cols-3 gap-2 md:gap-4">
         <SummaryCard label="Collectors" value={collectors.length} hint={`${activeCollectors.length} active`} />
         <SummaryCard label="Unassigned pickups" value={unassignedCount} hint="Waiting for a collector" />
         <SummaryCard
@@ -612,13 +612,13 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
 
 function SummaryCard({ label, value, hint }: { label: string; value: number; hint: string }) {
   return (
-    <Card>
-      <CardHeader className="pb-2">
-        <CardTitle className="text-sm font-medium text-muted-foreground">{label}</CardTitle>
+    <Card className="gap-1 py-3 md:gap-6 md:py-6">
+      <CardHeader className="px-3 pb-0 md:px-6 md:pb-2">
+        <CardTitle className="text-xs md:text-sm font-medium leading-tight text-muted-foreground">{label}</CardTitle>
       </CardHeader>
-      <CardContent>
-        <div className="text-2xl font-bold">{value}</div>
-        <p className="text-xs text-muted-foreground mt-1">{hint}</p>
+      <CardContent className="px-3 md:px-6">
+        <div className="text-xl md:text-2xl font-bold">{value}</div>
+        <p className="hidden md:block text-xs text-muted-foreground mt-1">{hint}</p>
       </CardContent>
     </Card>
   )
