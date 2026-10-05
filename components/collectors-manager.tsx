@@ -50,11 +50,14 @@ import {
 import {
   AlertCircle,
   Calendar,
+  CheckCircle2,
+  Loader2,
   ClipboardList,
   MapPin,
   MoreHorizontal,
   Pencil,
   Phone,
+  RotateCw,
   Trash2,
   UserPlus,
   Users,
@@ -221,6 +224,11 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
     const collector = value === UNASSIGNED ? null : collectors.find((c) => c.id === value) ?? null
     const ok = await FirebaseService.assignPickup(pickup, collector)
     if (!ok) setError("Could not update the assignment. Please try again.")
+  }
+
+  const handleResend = async (pickup: CollectorPickup) => {
+    const ok = await FirebaseService.resendCollectorNotification(pickup)
+    if (!ok) setError("Could not resend the WhatsApp message. Please try again.")
   }
 
   const handleStatus = async (pickup: CollectorPickup, status: PickupStatus) => {
@@ -454,6 +462,9 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
                                 ))}
                             </SelectContent>
                           </Select>
+                          {p.collectorId && known && p.status !== "completed" && p.status !== "cancelled" && (
+                            <CollectorNotice pickup={p} onResend={() => handleResend(p)} />
+                          )}
                         </TableCell>
                         <TableCell>
                           <Select value={p.status} onValueChange={(v) => handleStatus(p, v as PickupStatus)}>
@@ -489,7 +500,7 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
           <DialogHeader>
             <DialogTitle>{editing ? "Edit collector" : "Register collector"}</DialogTitle>
             <DialogDescription>
-              Collector details are only visible to admins. Customers are never sent the collector&apos;s name.
+              The collector gets each assigned pickup&apos;s address and details on WhatsApp. Customers are never sent the collector&apos;s name.
             </DialogDescription>
           </DialogHeader>
           <form
@@ -506,7 +517,7 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="collector-phone">Phone number</Label>
+              <Label htmlFor="collector-phone">WhatsApp number</Label>
               <Input
                 id="collector-phone"
                 value={form.phone}
@@ -563,6 +574,37 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+    </div>
+  )
+}
+
+// WhatsApp delivery state for the collector's assignment message.
+function CollectorNotice({ pickup, onResend }: { pickup: CollectorPickup; onResend: () => void }) {
+  const resend = (
+    <button type="button" onClick={onResend} className="inline-flex items-center gap-1 underline underline-offset-2">
+      <RotateCw className="w-3 h-3" /> Resend
+    </button>
+  )
+
+  if (pickup.collectorNotifyError) {
+    return (
+      <div className="mt-1 flex items-center gap-2 text-xs text-destructive" title={pickup.collectorNotifyError}>
+        <AlertCircle className="w-3 h-3" /> WhatsApp not sent · {resend}
+      </div>
+    )
+  }
+  if (pickup.collectorNotifiedAt) {
+    return (
+      <div className="mt-1 flex items-center gap-2 text-xs text-green-700">
+        <CheckCircle2 className="w-3 h-3" />
+        Sent on WhatsApp {pickup.collectorNotifiedAt.toLocaleString("en-NG", { dateStyle: "short", timeStyle: "short" })}
+        <span className="text-muted-foreground">· {resend}</span>
+      </div>
+    )
+  }
+  return (
+    <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+      <Loader2 className="w-3 h-3 animate-spin" /> Sending WhatsApp…
     </div>
   )
 }

@@ -147,6 +147,8 @@ function normalizeCollectorPickup(data: any, id: string, col: PickupCollection):
     status:        data.status ?? "pending",
     collectorId:   data.collectorId ?? null,
     collectorName: data.collectorName ?? "",
+    collectorNotifiedAt:  data.collectorNotifiedAt ? parseDate(data.collectorNotifiedAt) : null,
+    collectorNotifyError: data.collectorNotifyError ?? null,
     createdAt:     parseDate(data.createdAt),
   }
 }
@@ -435,12 +437,15 @@ export class FirebaseService {
 
   // Assigning moves a pending pickup to "assigned"; unassigning returns an
   // unfinished pickup to "pending". The collector's name is stored for the
-  // admin only — the customer notification never includes it.
+  // admin only — the customer notification never includes it. The server
+  // sees the new collectorId and WhatsApps the collector the pickup details.
   static async assignPickup(pickup: CollectorPickup, collector: Collector | null): Promise<boolean> {
     try {
       const update: Record<string, unknown> = {
         collectorId: collector?.id ?? null,
         collectorName: collector?.name ?? "",
+        collectorNotifiedAt: null,
+        collectorNotifyError: null,
         updatedAt: new Date().toISOString(),
       }
       if (collector && pickup.status === "pending") {
@@ -451,6 +456,19 @@ export class FirebaseService {
       await updateDoc(doc(db, pickup.collection, pickup.id), update)
       return true
     } catch (err) { console.error("pickup assign failed", err); return false }
+  }
+
+  // Clearing collectorNotifiedId makes the server treat the collector as
+  // newly assigned and send the WhatsApp message again.
+  static async resendCollectorNotification(pickup: CollectorPickup): Promise<boolean> {
+    try {
+      await updateDoc(doc(db, pickup.collection, pickup.id), {
+        collectorNotifiedId: null,
+        collectorNotifiedAt: null,
+        collectorNotifyError: null,
+      })
+      return true
+    } catch (err) { console.error("collector notification resend failed", err); return false }
   }
 
   static async updatePickupStatus(pickup: CollectorPickup, status: PickupStatus): Promise<boolean> {

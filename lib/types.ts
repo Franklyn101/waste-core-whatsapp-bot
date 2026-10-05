@@ -58,5 +58,8 @@ export interface CollectorPickup {
   status: string
   collectorId: string | null
   collectorName: string
+  // WhatsApp notification to the assigned collector, written by the server.
+  collectorNotifiedAt: Date | null
+  collectorNotifyError: string | null
   createdAt: Date
 }

@@ -136,6 +136,96 @@ async function sendWhatsAppTemplate(to, templateName, language = "en_US", compon
   }
 }
 
+// ================= COLLECTOR NOTIFICATIONS =================
+/**
+ * Convert a collector's phone to the international format Flaxxa expects.
+ * Accepts "+2348012345678", "2348012345678" or local "08012345678".
+ */
+function toInternationalPhone(phone) {
+  const digits = (phone || "").replace(/^whatsapp:/i, "").replace(/[^\d]/g, "")
+  if (digits.length === 11 && digits.startsWith("0")) return `234${digits.slice(1)}`
+  return digits
+}
+
+// The send helpers return undefined on HTTP errors; also treat an error
+// payload in a 200 response as not delivered.
+function wasDelivered(res) {
+  if (!res) return false
+  if (res.error || res.success === false) return false
+  if (typeof res.status === "string" && /error|fail/i.test(res.status)) return false
+  return true
+}
+
+function mapsLink(address) {
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address || "")}`
+}
+
+/**
+ * WhatsApp the assigned collector the pickup location and details.
+ *
+ * Collectors usually haven't messaged the business in the last 24 hours, so
+ * this uses an approved template first and falls back to a free-form message
+ * (which only works inside the 24-hour window).
+ *
+ * SETUP REQUIRED — create an approved template in your Flaxxa dashboard:
+ *
+ *   name: "collector_pickup_assigned"   language: en_US
+ *   body: "Hello {{1}}, you have a new pickup.
+ *          Customer: {{2}}
+ *          Phone: {{3}}
+ *          Address: {{4}}
+ *          Map: {{5}}
+ *          Waste: {{6}}
+ *          Date: {{7}}"
+ *
+ * The result is written back to the pickup (collectorNotifiedAt or
+ * collectorNotifyError) so the dashboard can show it and offer a resend.
+ */
+async function notifyCollector(pickupRef, pickup) {
+  const collectorDoc = await db.collection("collectors").doc(pickup.collectorId).get()
+  const collector = collectorDoc.exists ? collectorDoc.data() : null
+  const phone = toInternationalPhone(collector?.phone)
+
+  if (!collector || !phone) {
+    await pickupRef.update({
+      collectorNotifiedAt: null,
+      collectorNotifyError: "Collector has no phone number on file.",
+    })
+    return
+  }
+
+  const customerPhone = normalizePhone(pickup.customerPhone) || "N/A"
+  const address = pickup.address || "N/A"
+  const fields = [
+    collector.name || "there",
+    pickup.customerName || "N/A",
+    customerPhone,
+    address,
+    mapsLink(address),
+    pickup.wasteType || "N/A",
+    pickup.pickupDate || "N/A",
+  ]
+
+  let sent = wasDelivered(await sendWhatsAppTemplate(phone, "collector_pickup_assigned", "en_US", [
+    { type: "body", parameters: fields.map((text) => ({ type: "text", text })) },
+  ]))
+
+  if (!sent) {
+    sent = wasDelivered(await sendWhatsAppMessage(
+      phone,
+      `Hello ${fields[0]}, you have a new pickup.\n\n` +
+      `Customer: ${fields[1]}\nPhone: ${fields[2]}\nAddress: ${fields[3]}\n` +
+      `Map: ${fields[4]}\nWaste: ${fields[5]}\nDate: ${fields[6]}`
+    ))
+  }
+
+  await pickupRef.update(
+    sent
+      ? { collectorNotifiedAt: new Date().toISOString(), collectorNotifyError: null }
+      : { collectorNotifiedAt: null, collectorNotifyError: "WhatsApp message could not be delivered." }
+  )
+}
+
 // ================= FIRESTORE LISTENERS =================
 function setupStatusListeners() {
   const handleChanges = (collectionName) => {
@@ -143,62 +233,78 @@ function setupStatusListeners() {
       (snapshot) => {
         snapshot.docChanges().forEach(async (change) => {
          try {
+          if (change.type === "removed") return
           const data = change.doc.data()
+          const ref = change.doc.ref
 
-          // Record the current status on existing/new docs without notifying,
-          // so later non-status edits don't look like a status change.
-          if (change.type === "added" && data.notifiedStatus === undefined) {
-            await change.doc.ref.update({ notifiedStatus: data.status ?? null })
+          // Record the current status/collector on docs that predate this
+          // tracking (and on brand-new docs) without notifying anyone.
+          const backfill = {}
+          if (data.notifiedStatus === undefined) backfill.notifiedStatus = data.status ?? null
+          if (data.collectorNotifiedId === undefined) backfill.collectorNotifiedId = data.collectorId ?? null
+          if (Object.keys(backfill).length) {
+            await ref.update(backfill)
             return
           }
 
-          if (change.type === "modified") {
-            // Only notify on a status change. Other edits (e.g. reassigning a
-            // collector) also fire "modified" and must not re-send messages
-            // or create duplicate invoices.
-            if (data.status === data.notifiedStatus) return
-            await change.doc.ref.update({ notifiedStatus: data.status ?? null })
+          // Only act when the status or the assigned collector actually
+          // changed. Other edits (and our own marker writes) also fire
+          // "modified" and must not re-send messages or duplicate invoices.
+          const statusChanged = data.status !== data.notifiedStatus
+          const collectorChanged = (data.collectorId ?? null) !== (data.collectorNotifiedId ?? null)
+          if (!statusChanged && !collectorChanged) return
 
-            if (data.status === "assigned") {
-              await sendWhatsAppTemplate(
-                data.customerPhone,
-                "driver_assigned",
-                "en_US",
-                [
-                  {
-                    type: "body",
-                    parameters: [
-                      // Collector details are admin-only; never sent to customers.
-                      { type: "text", text: "your driver" },
-                      { type: "text", text: data.pickupDate },
-                    ],
-                  },
-                ]
-              )
-            }
+          const markers = {}
+          if (statusChanged) markers.notifiedStatus = data.status ?? null
+          if (collectorChanged) markers.collectorNotifiedId = data.collectorId ?? null
+          await ref.update(markers)
 
-            if (data.status === "completed") {
-              await sendWhatsAppTemplate(
-                data.customerPhone,
-                "pickup_completed",
-                "en_US",
-                [
-                  {
-                    type: "body",
-                    parameters: [
-                      { type: "text", text: data.pickupDate },
-                    ],
-                  },
-                ]
-              )
-              await db.collection("invoices").add({
-                customerPhone: data.customerPhone,
-                amount: SERVICE_PRICES[data.serviceType] ?? 0,
-                status: "paid",
-                relatedPickupId: change.doc.id,
-                createdAt: new Date().toISOString(),
-              })
-            }
+          const isOpen = data.status !== "completed" && data.status !== "cancelled"
+          if (collectorChanged && data.collectorId && isOpen) {
+            await notifyCollector(ref, data)
+          }
+
+          if (!statusChanged) return
+
+          if (data.status === "assigned") {
+            await sendWhatsAppTemplate(
+              data.customerPhone,
+              "driver_assigned",
+              "en_US",
+              [
+                {
+                  type: "body",
+                  parameters: [
+                    // Collector details are admin-only; never sent to customers.
+                    { type: "text", text: "your driver" },
+                    { type: "text", text: data.pickupDate },
+                  ],
+                },
+              ]
+            )
+          }
+
+          if (data.status === "completed") {
+            await sendWhatsAppTemplate(
+              data.customerPhone,
+              "pickup_completed",
+              "en_US",
+              [
+                {
+                  type: "body",
+                  parameters: [
+                    { type: "text", text: data.pickupDate },
+                  ],
+                },
+              ]
+            )
+            await db.collection("invoices").add({
+              customerPhone: data.customerPhone,
+              amount: SERVICE_PRICES[data.serviceType] ?? 0,
+              status: "paid",
+              relatedPickupId: change.doc.id,
+              createdAt: new Date().toISOString(),
+            })
           }
          } catch (err) {
           console.error(`Status listener failed on ${collectionName}/${change.doc.id}:`, err)
