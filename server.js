@@ -302,13 +302,25 @@ nextApp.prepare().then(() => {
     .split(",")
     .map((o) => o.trim())
 
+  // The dashboard is served by this same server, so its own requests are
+  // always allowed; FRONTEND_URL only lists *other* sites that may call in.
+  // Browsers send an Origin header on POST/PATCH/DELETE even when same-site.
+  function isSameOrigin(req, origin) {
+    try {
+      const { host } = new URL(origin)
+      const forwarded = (req.headers["x-forwarded-host"] || "").split(",")[0].trim()
+      return host === req.headers.host || (forwarded && host === forwarded)
+    } catch {
+      return false
+    }
+  }
+
   app.use(
-    cors({
-      origin: (origin, callback) => {
-        if (!origin || allowedOrigins.includes(origin)) callback(null, true)
-        else callback(new Error(`CORS: origin ${origin} not allowed`))
-      },
-      credentials: true,
+    cors((req, callback) => {
+      const origin = req.headers.origin
+      const allowed = !origin || allowedOrigins.includes(origin) || isSameOrigin(req, origin)
+      if (allowed) callback(null, { origin: true, credentials: true })
+      else callback(new Error(`CORS: origin ${origin} not allowed`))
     })
   )
   app.use(bodyParser.urlencoded({ extended: false }))
