@@ -26,6 +26,3 @@ firebase-service-key.json
 # typescript
 *.tsbuildinfo
 next-env.d.ts
-
-# Firebase admin credentials (use env vars in production)
-server/service-account-key.json
