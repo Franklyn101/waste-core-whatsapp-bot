@@ -142,8 +142,22 @@ function setupStatusListeners() {
     db.collection(collectionName).onSnapshot(
       (snapshot) => {
         snapshot.docChanges().forEach(async (change) => {
+         try {
+          const data = change.doc.data()
+
+          // Record the current status on existing/new docs without notifying,
+          // so later non-status edits don't look like a status change.
+          if (change.type === "added" && data.notifiedStatus === undefined) {
+            await change.doc.ref.update({ notifiedStatus: data.status ?? null })
+            return
+          }
+
           if (change.type === "modified") {
-            const data = change.doc.data()
+            // Only notify on a status change. Other edits (e.g. reassigning a
+            // collector) also fire "modified" and must not re-send messages
+            // or create duplicate invoices.
+            if (data.status === data.notifiedStatus) return
+            await change.doc.ref.update({ notifiedStatus: data.status ?? null })
 
             if (data.status === "assigned") {
               await sendWhatsAppTemplate(
@@ -154,7 +168,8 @@ function setupStatusListeners() {
                   {
                     type: "body",
                     parameters: [
-                      { type: "text", text: data.driverName || "your driver" },
+                      // Collector details are admin-only; never sent to customers.
+                      { type: "text", text: "your driver" },
                       { type: "text", text: data.pickupDate },
                     ],
                   },
@@ -185,6 +200,9 @@ function setupStatusListeners() {
               })
             }
           }
+         } catch (err) {
+          console.error(`Status listener failed on ${collectionName}/${change.doc.id}:`, err)
+         }
         })
       },
       (err) => console.error(`Snapshot listener error on ${collectionName}:`, err)

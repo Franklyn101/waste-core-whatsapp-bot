@@ -15,6 +15,7 @@ import { InstantPickupTable } from "@/components/instant-pickup"
 import  {WasteBagOrdersTable }  from "@/components/waste-bag-orders"
 import { UpgradeRequestsTable } from "@/components/upgrade-request-table"
 import { SupportTicketsTable } from "@/components/support-ticket-table"
+import { CollectorsManager } from "@/components/collectors-manager"
 
 
 export default function DashboardPage() {
@@ -99,6 +100,18 @@ export default function DashboardPage() {
         </p>
       </div>
       <InstantPickupTable searchQuery={searchQuery} />
+    </div>
+  )
+  case "collectors":
+    return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-3xl font-bold text-balance">Collectors</h1>
+        <p className="text-muted-foreground mt-2">
+          Register collectors, assign pickups to them, and track pickup progress.
+        </p>
+      </div>
+      <CollectorsManager searchQuery={searchQuery} />
     </div>
   )
   case "waste-bag-orders":

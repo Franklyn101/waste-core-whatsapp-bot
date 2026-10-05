@@ -99,6 +99,8 @@ export function PickupRequestsTable({ searchQuery = "" }: PickupRequestsTablePro
       pending:   "bg-chart-2/20 text-chart-2 hover:bg-chart-2/30",
       confirmed: "bg-chart-1/20 text-chart-1 hover:bg-chart-1/30",
       completed: "bg-chart-3/20 text-chart-3 hover:bg-chart-3/30",
+      assigned:  "bg-blue-500/20 text-blue-600 hover:bg-blue-500/30",
+      incomplete: "bg-orange-500/20 text-orange-600 hover:bg-orange-500/30",
       cancelled: "bg-destructive/20 text-destructive hover:bg-destructive/30",
     }
     return variants[status as keyof typeof variants] || variants.pending

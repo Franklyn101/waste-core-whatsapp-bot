@@ -2,7 +2,10 @@ import {
   collection,
   getDocs,
   doc,
+  addDoc,
   updateDoc,
+  deleteDoc,
+  writeBatch,
   onSnapshot,
   type QuerySnapshot,
   type DocumentData,
@@ -15,6 +18,11 @@ import type {
   UpgradeRequest,
   SupportTicket,
   DashboardStats,
+  Collector,
+  CollectorInput,
+  CollectorPickup,
+  PickupCollection,
+  PickupStatus,
 } from "./types"
 
 // ======================
@@ -114,6 +122,37 @@ function normalizeSupportTicket(data: any, id: string): SupportTicket {
     updatedAt,
   }
 }
+
+function normalizeCollector(data: any, id: string): Collector {
+  return {
+    id,
+    name:      data.name ?? "",
+    phone:     data.phone ?? "",
+    area:      data.area ?? "",
+    active:    data.active ?? true,
+    createdAt: parseDate(data.createdAt),
+    updatedAt: parseDate(data.updatedAt || data.createdAt),
+  }
+}
+
+function normalizeCollectorPickup(data: any, id: string, col: PickupCollection): CollectorPickup {
+  return {
+    id,
+    collection:    col,
+    customerName:  data.customerName ?? "",
+    customerPhone: (data.customerPhone ?? "").replace(/^whatsapp:/i, ""),
+    address:       data.address ?? "",
+    wasteType:     data.wasteType ?? "",
+    pickupDate:    data.pickupDate ?? "",
+    serviceType:   data.serviceLabel ?? data.serviceType ?? "",
+    status:        data.status ?? "pending",
+    collectorId:   data.collectorId ?? null,
+    collectorName: data.collectorName ?? "",
+    createdAt:     parseDate(data.createdAt),
+  }
+}
+
+const PICKUP_COLLECTIONS: PickupCollection[] = ["instantPickups", "pickupRequests"]
 
 // ======================
 // CLIENT-SIDE SORT — newest first, then cap to limitCount.
@@ -311,5 +350,114 @@ export class FirebaseService {
   static async getSupportTickets(limitCount = 50): Promise<SupportTicket[]> {
     const snap = await getDocs(collection(db, "supportTickets"))
     return sortByCreatedAt(snap.docs.map((d) => normalizeSupportTicket(d.data(), d.id)), limitCount)
+  }
+
+  // ── COLLECTORS ────────────────────────────────────────────────────────────
+  static subscribeToCollectors(
+    callback: (collectors: Collector[]) => void,
+    onError?: (err: Error) => void
+  ): () => void {
+    return onSnapshot(
+      collection(db, "collectors"),
+      (snapshot) => callback(
+        snapshot.docs
+          .map((d) => normalizeCollector(d.data(), d.id))
+          .sort((a, b) => a.name.localeCompare(b.name))
+      ),
+      (err) => { console.error("collectors error:", err); onError?.(err) }
+    )
+  }
+
+  static async createCollector(input: CollectorInput): Promise<boolean> {
+    try {
+      const now = new Date().toISOString()
+      await addDoc(collection(db, "collectors"), { ...input, createdAt: now, updatedAt: now })
+      return true
+    } catch (err) { console.error("collector create failed", err); return false }
+  }
+
+  static async updateCollector(collectorId: string, input: CollectorInput): Promise<boolean> {
+    try {
+      await updateDoc(doc(db, "collectors", collectorId), { ...input, updatedAt: new Date().toISOString() })
+      return true
+    } catch (err) { console.error("collector update failed", err); return false }
+  }
+
+  // Deletes the collector and returns their unfinished pickups to the
+  // unassigned pool so no job is left pointing at a missing collector.
+  static async deleteCollector(collectorId: string, pickups: CollectorPickup[]): Promise<boolean> {
+    try {
+      const batch = writeBatch(db)
+      const now = new Date().toISOString()
+      pickups
+        .filter((p) => p.collectorId === collectorId)
+        .forEach((p) => {
+          const unfinished = p.status !== "completed" && p.status !== "cancelled"
+          batch.update(doc(db, p.collection, p.id), {
+            collectorId: null,
+            collectorName: unfinished ? "" : p.collectorName,
+            ...(unfinished ? { status: "pending" } : {}),
+            updatedAt: now,
+          })
+        })
+      batch.delete(doc(db, "collectors", collectorId))
+      await batch.commit()
+      return true
+    } catch (err) { console.error("collector delete failed", err); return false }
+  }
+
+  // ── COLLECTOR PICKUPS (instant + weekly) ──────────────────────────────────
+  static subscribeToCollectorPickups(
+    callback: (pickups: CollectorPickup[]) => void,
+    onError?: (err: Error) => void
+  ): () => void {
+    const byCollection: Partial<Record<PickupCollection, CollectorPickup[]>> = {}
+    const emit = () => {
+      if (Object.keys(byCollection).length < PICKUP_COLLECTIONS.length) return
+      callback(sortByCreatedAt(Object.values(byCollection).flat() as CollectorPickup[]))
+    }
+    const unsubs = PICKUP_COLLECTIONS.map((col) =>
+      onSnapshot(
+        collection(db, col),
+        (snapshot) => {
+          byCollection[col] = snapshot.docs.map((d) => normalizeCollectorPickup(d.data(), d.id, col))
+          emit()
+        },
+        (err) => {
+          console.error(`${col} error:`, err)
+          byCollection[col] = []
+          emit()
+          onError?.(err)
+        }
+      )
+    )
+    return () => unsubs.forEach((u) => u())
+  }
+
+  // Assigning moves a pending pickup to "assigned"; unassigning returns an
+  // unfinished pickup to "pending". The collector's name is stored for the
+  // admin only — the customer notification never includes it.
+  static async assignPickup(pickup: CollectorPickup, collector: Collector | null): Promise<boolean> {
+    try {
+      const update: Record<string, unknown> = {
+        collectorId: collector?.id ?? null,
+        collectorName: collector?.name ?? "",
+        updatedAt: new Date().toISOString(),
+      }
+      if (collector && pickup.status === "pending") {
+        update.status = "assigned"
+        update.assignedAt = update.updatedAt
+      }
+      if (!collector && pickup.status === "assigned") update.status = "pending"
+      await updateDoc(doc(db, pickup.collection, pickup.id), update)
+      return true
+    } catch (err) { console.error("pickup assign failed", err); return false }
+  }
+
+  static async updatePickupStatus(pickup: CollectorPickup, status: PickupStatus): Promise<boolean> {
+    try {
+      await updateDoc(doc(db, pickup.collection, pickup.id), { status, updatedAt: new Date().toISOString() })
+      return true
+    } catch (err) { console.error("pickup status update failed", err); return false }
   }
 }
