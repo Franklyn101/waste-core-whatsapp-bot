@@ -57,16 +57,16 @@ export function DashboardStatsCards({ stats, isLoading, lastUpdated }: Dashboard
 
   if (isLoading) {
     return (
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-6">
         {[...Array(4)].map((_, i) => (
-          <Card key={i}>
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+          <Card key={i} className="gap-3 py-4 md:gap-6 md:py-6">
+            <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 px-4 pb-0 md:px-6 md:pb-2">
               <CardTitle className="text-sm font-medium">
                 <div className="h-4 bg-muted animate-pulse rounded" />
               </CardTitle>
               <div className="h-4 w-4 bg-muted animate-pulse rounded" />
             </CardHeader>
-            <CardContent>
+            <CardContent className="px-4 md:px-6">
               <div className="h-8 bg-muted animate-pulse rounded mb-1" />
             </CardContent>
           </Card>
@@ -96,18 +96,18 @@ export function DashboardStatsCards({ stats, isLoading, lastUpdated }: Dashboard
         )}
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-6">
         {statCards.map((stat) => {
           const Icon = stat.icon
           return (
-            <Card key={stat.title}>
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium text-muted-foreground">{stat.title}</CardTitle>
+            <Card key={stat.title} className="gap-3 py-4 md:gap-6 md:py-6">
+              <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 px-4 pb-0 md:px-6 md:pb-2">
+                <CardTitle className="text-xs md:text-sm font-medium leading-tight text-muted-foreground">{stat.title}</CardTitle>
                 <div className={`p-2 rounded-lg ${stat.bgColor}`}>
                   <Icon className={`w-4 h-4 ${stat.color}`} />
                 </div>
               </CardHeader>
-              <CardContent>
+              <CardContent className="px-4 md:px-6">
                 <div className="text-2xl font-bold">{stat.value}</div>
               </CardContent>
             </Card>

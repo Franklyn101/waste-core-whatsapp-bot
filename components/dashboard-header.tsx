@@ -11,26 +11,39 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { Bell, LogOut, Search, Settings } from "lucide-react"
+import { Bell, LogOut, Menu, Search, Settings } from "lucide-react"
 import { useAdminAuth } from "@/lib/admin-auth"
 
 interface DashboardHeaderProps {
   searchQuery: string
   onSearchChange: (query: string) => void
+  onMenuClick?: () => void
 }
 
-export function DashboardHeader({ searchQuery, onSearchChange }: DashboardHeaderProps) {
+export function DashboardHeader({ searchQuery, onSearchChange, onMenuClick }: DashboardHeaderProps) {
   const { profile, signOut } = useAdminAuth()
   const initials = (profile?.username ?? "ad").slice(0, 2).toUpperCase()
 
   return (
-    <header className="flex items-center justify-between px-6 py-4 bg-background border-b border-border">
+    <header className="sticky top-0 z-30 flex items-center gap-2 px-3 py-3 md:gap-4 md:px-6 md:py-4 bg-background border-b border-border">
+      {/* Menu button: phones only (the sidebar is a drawer there) */}
+      <Button
+        variant="ghost"
+        size="icon"
+        className="md:hidden shrink-0"
+        onClick={onMenuClick}
+        aria-label="Open menu"
+      >
+        <Menu className="w-5 h-5" />
+      </Button>
+
       {/* Search Bar */}
-      <div className="flex-1 max-w-md">
+      <div className="flex-1 min-w-0 md:max-w-md">
         <div className="relative">
           <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-muted-foreground" />
           <Input
-            placeholder="Search requests, users, or phone numbers..."
+            type="search"
+            placeholder="Search..."
             value={searchQuery}
             onChange={(e) => onSearchChange(e.target.value)}
             className="pl-10 bg-muted/50"
@@ -39,11 +52,11 @@ export function DashboardHeader({ searchQuery, onSearchChange }: DashboardHeader
       </div>
 
       {/* Header Actions */}
-      <div className="flex items-center gap-4">
-        <Button variant="ghost" size="sm" className="text-muted-foreground">
+      <div className="flex items-center gap-1 md:gap-4 shrink-0 md:ml-auto">
+        <Button variant="ghost" size="sm" className="hidden sm:inline-flex text-muted-foreground">
           <Bell className="w-5 h-5" />
         </Button>
-        <Button variant="ghost" size="sm" className="text-muted-foreground">
+        <Button variant="ghost" size="sm" className="hidden sm:inline-flex text-muted-foreground">
           <Settings className="w-5 h-5" />
         </Button>
         <DropdownMenu>

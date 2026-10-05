@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useRef } from "react"
 import { DashboardSidebar } from "@/components/dashboard-sidebar"
 import { DashboardHeader } from "@/components/dashboard-header"
 import { DashboardStatsCards } from "@/components/dashboard-stats"
@@ -34,6 +34,8 @@ export default function AdminPage() {
 function DashboardPage() {
   const { profile } = useAdminAuth()
   const isMainAdmin = profile?.role === "main"
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  const mainRef = useRef<HTMLElement>(null)
   const [activeSection, setActiveSection] = useState("overview")
   const [searchQuery, setSearchQuery] = useState("")
   const [stats, setStats] = useState<DashboardStats>({
@@ -66,7 +68,7 @@ function DashboardPage() {
         return (
           <div className="space-y-6">
             <div>
-              <h1 className="text-3xl font-bold text-balance">Dashboard Overview</h1>
+              <h1 className="text-2xl md:text-3xl font-bold text-balance">Dashboard Overview</h1>
               <p className="text-muted-foreground mt-2">
                 Monitor your waste collection service performance and manage requests.
               </p>
@@ -85,7 +87,7 @@ function DashboardPage() {
         return (
           <div className="space-y-6">
             <div>
-              <h1 className="text-3xl font-bold text-balance">Pickup Requests</h1>
+              <h1 className="text-2xl md:text-3xl font-bold text-balance">Pickup Requests</h1>
               <p className="text-muted-foreground mt-2">
                 Manage and track all waste collection requests from WhatsApp.
               </p>
@@ -97,7 +99,7 @@ function DashboardPage() {
         return (
           <div className="space-y-6">
             <div>
-              <h1 className="text-3xl font-bold text-balance">User Data</h1>
+              <h1 className="text-2xl md:text-3xl font-bold text-balance">User Data</h1>
               <p className="text-muted-foreground mt-2">View customer information and request history.</p>
             </div>
             <UsersTable searchQuery={searchQuery} />
@@ -109,7 +111,7 @@ function DashboardPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-3xl font-bold text-balance">Instant Pickups</h1>
+        <h1 className="text-2xl md:text-3xl font-bold text-balance">Instant Pickups</h1>
         <p className="text-muted-foreground mt-2">
           Manage and track all instant pickup requests from WhatsApp.
         </p>
@@ -121,7 +123,7 @@ function DashboardPage() {
     return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-3xl font-bold text-balance">Collectors</h1>
+        <h1 className="text-2xl md:text-3xl font-bold text-balance">Collectors</h1>
         <p className="text-muted-foreground mt-2">
           Register collectors, assign pickups to them, and track pickup progress.
         </p>
@@ -133,7 +135,7 @@ function DashboardPage() {
     return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-3xl font-bold text-balance">Waste Bag Orders</h1>
+        <h1 className="text-2xl md:text-3xl font-bold text-balance">Waste Bag Orders</h1>
         <p className="text-muted-foreground mt-2">
           Manage and track all waste bag orders from WhatsApp.
         </p>
@@ -146,7 +148,7 @@ function DashboardPage() {
       return (
         <div className="space-y-6">
       <div>
-        <h1 className="text-3xl font-bold text-balance">Upgrade Plans</h1>
+        <h1 className="text-2xl md:text-3xl font-bold text-balance">Upgrade Plans</h1>
         <p className="text-muted-foreground mt-2">
           Manage and track all upgrade plan requests from WhatsApp.
         </p>
@@ -159,7 +161,7 @@ function DashboardPage() {
       return (
         <div className="space-y-6">
       <div>
-        <h1 className="text-3xl font-bold text-balance">Support Tickets</h1>
+        <h1 className="text-2xl md:text-3xl font-bold text-balance">Support Tickets</h1>
         <p className="text-muted-foreground mt-2">
           Manage and track all support tickets from WhatsApp.
         </p>
@@ -175,7 +177,7 @@ function DashboardPage() {
         return (
           <div className="space-y-6">
             <div>
-              <h1 className="text-3xl font-bold text-balance">Payment Receipts</h1>
+              <h1 className="text-2xl md:text-3xl font-bold text-balance">Payment Receipts</h1>
               <p className="text-muted-foreground mt-2">View and manage uploaded payment receipt images.</p>
             </div>
             <PaymentReceiptsGallery searchQuery={searchQuery} />
@@ -185,7 +187,7 @@ function DashboardPage() {
         return (
           <div className="space-y-6">
             <div>
-              <h1 className="text-3xl font-bold text-balance">Service Analytics</h1>
+              <h1 className="text-2xl md:text-3xl font-bold text-balance">Service Analytics</h1>
               <p className="text-muted-foreground mt-2">Analyze service performance and trends over time.</p>
             </div>
             <AnalyticsCharts />
@@ -196,7 +198,7 @@ function DashboardPage() {
         return (
           <div className="space-y-6">
             <div>
-              <h1 className="text-3xl font-bold text-balance">Sub-admins</h1>
+              <h1 className="text-2xl md:text-3xl font-bold text-balance">Sub-admins</h1>
               <p className="text-muted-foreground mt-2">
                 Create staff logins, reset their passwords, and turn access on or off.
               </p>
@@ -209,18 +211,35 @@ function DashboardPage() {
     }
   }
 
+  // New page: close the phone drawer and start at the top.
+  const changeSection = (section: string) => {
+    setActiveSection(section)
+    setMobileNavOpen(false)
+    mainRef.current?.scrollTo({ top: 0 })
+  }
+
   return (
-    <div className="flex h-screen bg-background">
-      {/* Sidebar */}
-      <DashboardSidebar activeSection={activeSection} onSectionChange={setActiveSection} isMainAdmin={isMainAdmin} />
+    <div className="flex h-dvh bg-background">
+      {/* Sidebar (fixed on desktop, drawer on phones) */}
+      <DashboardSidebar
+        activeSection={activeSection}
+        onSectionChange={changeSection}
+        isMainAdmin={isMainAdmin}
+        mobileOpen={mobileNavOpen}
+        onMobileOpenChange={setMobileNavOpen}
+      />
 
       {/* Main Content */}
-      <div className="flex-1 flex flex-col overflow-hidden">
+      <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
         {/* Header */}
-        <DashboardHeader searchQuery={searchQuery} onSearchChange={setSearchQuery} />
+        <DashboardHeader
+          searchQuery={searchQuery}
+          onSearchChange={setSearchQuery}
+          onMenuClick={() => setMobileNavOpen(true)}
+        />
 
         {/* Main Content Area */}
-        <main className="flex-1 overflow-y-auto p-6">{renderMainContent()}</main>
+        <main ref={mainRef} className="flex-1 overflow-y-auto p-4 md:p-6">{renderMainContent()}</main>
       </div>
     </div>
   )
