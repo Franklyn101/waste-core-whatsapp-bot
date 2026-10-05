@@ -41,7 +41,7 @@ export default function Header() {
         <Link href="/" className="flex items-center">
           <Image
             src="/images/waste-connectlogo.png"
-            alt="waste connect Logo"
+            alt="WasteCore logo"
             width={100}
             height={28}
             className="transition-all duration-300 max-sm:w-36 object-cover"
