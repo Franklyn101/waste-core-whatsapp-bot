@@ -3,11 +3,12 @@
 import { useState } from "react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
-import { LayoutDashboard, Truck, Ticket, Rocket, Trash, Zap, Users, Receipt, BarChart3, Menu, X, HardHat } from "lucide-react"
+import { LayoutDashboard, Truck, Ticket, Rocket, Trash, Zap, Users, Receipt, BarChart3, Menu, X, HardHat, UserCog } from "lucide-react"
 
 interface SidebarProps {
   activeSection: string
   onSectionChange: (section: string) => void
+  isMainAdmin?: boolean
 }
 
 const navigationItems = [
@@ -66,7 +67,16 @@ const navigationItems = [
   },
 ]
 
-export function DashboardSidebar({ activeSection, onSectionChange }: SidebarProps) {
+// Shown only to the main admin.
+const mainAdminItems = [
+  {
+    id: "sub-admins",
+    label: "Sub-admins",
+    icon: UserCog,
+  },
+]
+
+export function DashboardSidebar({ activeSection, onSectionChange, isMainAdmin = false }: SidebarProps) {
   const [isCollapsed, setIsCollapsed] = useState(false)
 
   return (
@@ -99,7 +109,7 @@ export function DashboardSidebar({ activeSection, onSectionChange }: SidebarProp
       {/* Navigation Items */}
       <nav className="flex-1 p-2">
         <ul className="space-y-1">
-          {navigationItems.map((item) => {
+          {[...navigationItems, ...(isMainAdmin ? mainAdminItems : [])].map((item) => {
             const Icon = item.icon
             const isActive = activeSection === item.id
 

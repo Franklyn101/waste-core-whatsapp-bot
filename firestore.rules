@@ -1,0 +1,46 @@
+rules_version = '2';
+
+// Security rules for the admin dashboard.
+//
+// The WhatsApp bot (server.js) uses the Firebase Admin SDK, which bypasses
+// these rules. Only the browser dashboard is restricted: every read and
+// write needs a signed-in, active admin from the `admins` collection.
+//
+// Deploy: Firebase console -> Firestore Database -> Rules -> paste -> Publish
+// (or `firebase deploy --only firestore:rules`).
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function adminDoc() {
+      return get(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    function isAdmin() {
+      return request.auth != null
+        && exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+        && adminDoc().data.active == true;
+    }
+
+    function isMainAdmin() {
+      return isAdmin() && adminDoc().data.role == "main";
+    }
+
+    // Admin accounts are created and changed only by the server API.
+    // Each admin can read their own profile; the main admin can list all.
+    match /admins/{uid} {
+      allow read: if request.auth != null && (request.auth.uid == uid || isMainAdmin());
+      allow write: if false;
+    }
+
+    // Setup state is server-only.
+    match /config/{doc} {
+      allow read, write: if false;
+    }
+
+    // Everything else (pickups, orders, tickets, collectors, invoices...)
+    // is available to any active admin, main or sub.
+    match /{collection}/{docId} {
+      allow read, write: if collection != "admins" && collection != "config" && isAdmin();
+    }
+  }
+}

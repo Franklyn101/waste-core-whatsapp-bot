@@ -845,6 +845,159 @@ nextApp.prepare().then(() => {
     }
   })
 
+  // ================= ADMIN ACCOUNTS =================
+  // Dashboard logins use Firebase Auth. Usernames map to a synthetic email
+  // (never emailed). Roles live in admins/{uid}: one "main" admin, created
+  // once via /setup, who manages any number of "sub" admins.
+  const ADMIN_EMAIL_DOMAIN = "admins.wastecore.local"
+  const USERNAME_RE = /^[a-z0-9._-]{3,30}$/
+  const mainAdminRef = () => db.collection("config").doc("mainAdmin")
+
+  function parseCredentials(body) {
+    const username = String(body?.username ?? "").trim().toLowerCase()
+    const password = String(body?.password ?? "")
+    if (!USERNAME_RE.test(username)) {
+      return { error: "Username must be 3-30 characters: letters, numbers, dot, dash or underscore." }
+    }
+    if (password.length < 8) return { error: "Password must be at least 8 characters." }
+    return { username, password }
+  }
+
+  function authErrorMessage(err) {
+    if (err?.code === "auth/email-already-exists") return "That username is already taken."
+    if (err?.code === "auth/invalid-password") return "Password must be at least 8 characters."
+    return "Something went wrong. Please try again."
+  }
+
+  // Verifies the caller's Firebase ID token and that they are the active main admin.
+  async function requireMainAdmin(req, res, next) {
+    try {
+      const token = (req.headers.authorization || "").replace(/^Bearer /, "")
+      const decoded = await admin.auth().verifyIdToken(token, true)
+      const profile = await db.collection("admins").doc(decoded.uid).get()
+      if (!profile.exists || profile.data().role !== "main" || profile.data().active === false) {
+        return res.status(403).json({ error: "Only the main admin can manage sub-admins." })
+      }
+      req.adminUid = decoded.uid
+      next()
+    } catch {
+      res.status(401).json({ error: "Please sign in again." })
+    }
+  }
+
+  async function loadSubAdmin(uid) {
+    const doc = await db.collection("admins").doc(uid).get()
+    return doc.exists && doc.data().role === "sub" ? doc : null
+  }
+
+  app.get("/api/admin-auth/status", async (req, res) => {
+    try {
+      const main = await mainAdminRef().get()
+      res.json({ setupRequired: !main.exists })
+    } catch (err) {
+      console.error("admin status failed:", err)
+      res.status(500).json({ error: "Could not check admin setup." })
+    }
+  })
+
+  // One-time creation of the main admin. config/mainAdmin is claimed with
+  // create(), which fails if it exists, so only the first request wins.
+  app.post("/api/admin-auth/setup", async (req, res) => {
+    const creds = parseCredentials(req.body)
+    if (creds.error) return res.status(400).json({ error: creds.error })
+
+    try {
+      await mainAdminRef().create({ claimedAt: new Date().toISOString() })
+    } catch {
+      return res.status(409).json({ error: "The main admin has already been set up. Please sign in." })
+    }
+
+    try {
+      const user = await admin.auth().createUser({
+        email: `${creds.username}@${ADMIN_EMAIL_DOMAIN}`,
+        password: creds.password,
+        displayName: creds.username,
+      })
+      const now = new Date().toISOString()
+      await db.collection("admins").doc(user.uid).set({
+        username: creds.username, role: "main", active: true, createdAt: now,
+      })
+      await mainAdminRef().set({ uid: user.uid, claimedAt: now })
+      res.status(201).json({ ok: true })
+    } catch (err) {
+      await mainAdminRef().delete().catch(() => {})
+      console.error("main admin setup failed:", err)
+      res.status(400).json({ error: authErrorMessage(err) })
+    }
+  })
+
+  app.post("/api/sub-admins", requireMainAdmin, async (req, res) => {
+    const creds = parseCredentials(req.body)
+    if (creds.error) return res.status(400).json({ error: creds.error })
+    try {
+      const user = await admin.auth().createUser({
+        email: `${creds.username}@${ADMIN_EMAIL_DOMAIN}`,
+        password: creds.password,
+        displayName: creds.username,
+      })
+      await db.collection("admins").doc(user.uid).set({
+        username: creds.username,
+        role: "sub",
+        active: true,
+        createdAt: new Date().toISOString(),
+        createdBy: req.adminUid,
+      })
+      res.status(201).json({ uid: user.uid })
+    } catch (err) {
+      console.error("sub-admin create failed:", err)
+      res.status(err?.code === "auth/email-already-exists" ? 409 : 400).json({ error: authErrorMessage(err) })
+    }
+  })
+
+  // Reset password and/or activate/deactivate a sub-admin.
+  app.patch("/api/sub-admins/:uid", requireMainAdmin, async (req, res) => {
+    try {
+      const doc = await loadSubAdmin(req.params.uid)
+      if (!doc) return res.status(404).json({ error: "Sub-admin not found." })
+
+      const authUpdate = {}
+      if (req.body?.password !== undefined) {
+        const password = String(req.body.password)
+        if (password.length < 8) return res.status(400).json({ error: "Password must be at least 8 characters." })
+        authUpdate.password = password
+      }
+      if (typeof req.body?.active === "boolean") authUpdate.disabled = !req.body.active
+
+      if (!Object.keys(authUpdate).length) return res.status(400).json({ error: "Nothing to update." })
+      await admin.auth().updateUser(req.params.uid, authUpdate)
+      // Sign them out everywhere after a password change or deactivation.
+      await admin.auth().revokeRefreshTokens(req.params.uid)
+      await doc.ref.update({
+        ...(typeof req.body?.active === "boolean" ? { active: req.body.active } : {}),
+        updatedAt: new Date().toISOString(),
+      })
+      res.json({ ok: true })
+    } catch (err) {
+      console.error("sub-admin update failed:", err)
+      res.status(400).json({ error: authErrorMessage(err) })
+    }
+  })
+
+  app.delete("/api/sub-admins/:uid", requireMainAdmin, async (req, res) => {
+    try {
+      const doc = await loadSubAdmin(req.params.uid)
+      if (!doc) return res.status(404).json({ error: "Sub-admin not found." })
+      await admin.auth().deleteUser(req.params.uid).catch((err) => {
+        if (err?.code !== "auth/user-not-found") throw err
+      })
+      await doc.ref.delete()
+      res.json({ ok: true })
+    } catch (err) {
+      console.error("sub-admin delete failed:", err)
+      res.status(400).json({ error: "Could not delete the sub-admin. Please try again." })
+    }
+  })
+
   app.get("/health", (req, res) => {
     res.json({ status: "OK", timestamp: new Date().toISOString() })
   })
