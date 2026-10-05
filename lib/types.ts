@@ -29,3 +29,34 @@ export interface DashboardStats {
   completedRequests: number
   todayRequests: number
 }
+
+export interface Collector {
+  id: string
+  name: string
+  phone: string
+  area: string
+  active: boolean
+  createdAt: Date
+  updatedAt: Date
+}
+
+export type CollectorInput = Pick<Collector, "name" | "phone" | "area" | "active">
+
+export type PickupCollection = "instantPickups" | "pickupRequests"
+
+export type PickupStatus = "pending" | "assigned" | "completed" | "incomplete" | "cancelled"
+
+// A pickup from either pickup collection, as shown on the Collectors page.
+export interface CollectorPickup {
+  id: string
+  collection: PickupCollection
+  customerName: string
+  address: string
+  wasteType: string
+  pickupDate: string
+  serviceType: string
+  status: string
+  collectorId: string | null
+  collectorName: string
+  createdAt: Date
+}
