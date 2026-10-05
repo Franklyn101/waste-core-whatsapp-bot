@@ -21,24 +21,56 @@ cloudinary.config({
 
 // ================= FIREBASE =================
 // Credentials come from environment variables so the private key is never
-// committed. A local server/service-account-key.json (gitignored) is still
-// accepted for development.
+// committed. Either paste the whole key file into FIREBASE_SERVICE_ACCOUNT,
+// or set FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL and FIREBASE_PRIVATE_KEY.
+// A local server/service-account-key.json (gitignored) works for development.
+const FIREBASE_ENV_VARS = [
+  "FIREBASE_SERVICE_ACCOUNT",
+  "FIREBASE_PROJECT_ID",
+  "FIREBASE_CLIENT_EMAIL",
+  "FIREBASE_PRIVATE_KEY",
+]
+
+// Hosting dashboards often store the key's newlines as a literal "\n" and
+// may keep surrounding quotes.
+function cleanPrivateKey(key) {
+  const pem = key.trim().replace(/^"|"$/g, "").replace(/\\n/g, "\n").trim()
+  return `${pem}\n`
+}
+
 function loadServiceAccount() {
-  const { FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY } = process.env
-  if (FIREBASE_PROJECT_ID && FIREBASE_CLIENT_EMAIL && FIREBASE_PRIVATE_KEY) {
+  const env = process.env
+
+  if (env.FIREBASE_SERVICE_ACCOUNT?.trim()) {
+    let parsed
+    try {
+      parsed = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT)
+    } catch {
+      throw new Error("FIREBASE_SERVICE_ACCOUNT is set but is not valid JSON. Paste the whole key file, including { and }.")
+    }
+    if (!parsed.client_email || !parsed.private_key) {
+      throw new Error("FIREBASE_SERVICE_ACCOUNT is missing client_email or private_key. Paste the whole key file.")
+    }
+    return { ...parsed, private_key: cleanPrivateKey(parsed.private_key) }
+  }
+
+  if (env.FIREBASE_PROJECT_ID && env.FIREBASE_CLIENT_EMAIL && env.FIREBASE_PRIVATE_KEY) {
     return {
-      projectId: FIREBASE_PROJECT_ID,
-      clientEmail: FIREBASE_CLIENT_EMAIL,
-      // Hosting dashboards usually store newlines in the key as "\n".
-      privateKey: FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"),
+      projectId: env.FIREBASE_PROJECT_ID.trim(),
+      clientEmail: env.FIREBASE_CLIENT_EMAIL.trim(),
+      privateKey: cleanPrivateKey(env.FIREBASE_PRIVATE_KEY),
     }
   }
+
   try {
     return require("./server/service-account-key.json")
   } catch {
+    // Report which variable names are visible (never their values) so a
+    // misnamed or unapplied variable is easy to spot in the logs.
+    const seen = FIREBASE_ENV_VARS.map((name) => `${name}=${env[name] ? "set" : "missing"}`).join(", ")
     throw new Error(
-      "Firebase credentials missing: set FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL " +
-      "and FIREBASE_PRIVATE_KEY (or provide server/service-account-key.json locally)."
+      `Firebase credentials missing (${seen}). Set FIREBASE_SERVICE_ACCOUNT to the whole key file, ` +
+      "or set FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL and FIREBASE_PRIVATE_KEY."
     )
   }
 }
