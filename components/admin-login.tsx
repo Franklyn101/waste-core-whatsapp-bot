@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { Lock, Truck } from "lucide-react"
+import { AlertCircle, Lock, RotateCw, Truck } from "lucide-react"
 import { useAdminAuth } from "@/lib/admin-auth"
 
 // Shows the dashboard only to a signed-in admin. Before the main admin
@@ -13,14 +13,47 @@ import { useAdminAuth } from "@/lib/admin-auth"
 export function AdminGate({ children }: { children: ReactNode }) {
   const { user, profile, isLoading } = useAdminAuth()
   const [setupRequired, setSetupRequired] = useState<boolean | null>(null)
+  const [statusError, setStatusError] = useState<string | null>(null)
+  const [attempt, setAttempt] = useState(0)
 
   useEffect(() => {
     if (user) return
+    setSetupRequired(null)
+    setStatusError(null)
     fetch("/api/admin-auth/status")
-      .then((r) => r.json())
-      .then((d) => setSetupRequired(!!d.setupRequired))
-      .catch(() => setSetupRequired(false))
-  }, [user])
+      .then(async (r) => {
+        const d = await r.json().catch(() => null)
+        if (!r.ok || typeof d?.setupRequired !== "boolean") {
+          const reason = r.status === 404
+            ? "The admin API was not found. The dashboard must be served by server.js (npm start)."
+            : [d?.error, d?.detail].filter(Boolean).join(" ") || `Server error (${r.status}).`
+          throw new Error(reason)
+        }
+        setSetupRequired(d.setupRequired)
+      })
+      .catch((err) => setStatusError(err instanceof Error ? err.message : "Could not reach the server."))
+  }, [user, attempt])
+
+  // Don't fall back to the sign-in form when the setup check fails: that
+  // hides the problem and blocks first-time setup.
+  if (!user && statusError) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-muted/30 p-4">
+        <Card className="w-full max-w-sm">
+          <CardHeader className="space-y-3 text-center">
+            <AlertCircle className="mx-auto h-10 w-10 text-destructive" />
+            <CardTitle>Can&apos;t reach the admin service</CardTitle>
+            <CardDescription className="break-words">{statusError}</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button className="w-full" onClick={() => setAttempt((n) => n + 1)}>
+              <RotateCw className="mr-2 h-4 w-4" /> Try again
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
+    )
+  }
 
   if (isLoading || (!user && setupRequired === null)) {
     return (
