@@ -3,7 +3,16 @@
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
-import { Bell, Search, Settings } from "lucide-react"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+import { Bell, LogOut, Search, Settings } from "lucide-react"
+import { useAdminAuth } from "@/lib/admin-auth"
 
 interface DashboardHeaderProps {
   searchQuery: string
@@ -11,6 +20,9 @@ interface DashboardHeaderProps {
 }
 
 export function DashboardHeader({ searchQuery, onSearchChange }: DashboardHeaderProps) {
+  const { profile, signOut } = useAdminAuth()
+  const initials = (profile?.username ?? "ad").slice(0, 2).toUpperCase()
+
   return (
     <header className="flex items-center justify-between px-6 py-4 bg-background border-b border-border">
       {/* Search Bar */}
@@ -34,9 +46,27 @@ export function DashboardHeader({ searchQuery, onSearchChange }: DashboardHeader
         <Button variant="ghost" size="sm" className="text-muted-foreground">
           <Settings className="w-5 h-5" />
         </Button>
-        <Avatar className="w-8 h-8">
-          <AvatarFallback className="bg-primary text-primary-foreground text-sm">AD</AvatarFallback>
-        </Avatar>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button type="button" className="rounded-full" aria-label="Account menu">
+              <Avatar className="w-8 h-8">
+                <AvatarFallback className="bg-primary text-primary-foreground text-sm">{initials}</AvatarFallback>
+              </Avatar>
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuLabel>
+              <div className="font-medium">{profile?.username}</div>
+              <div className="text-xs font-normal text-muted-foreground">
+                {profile?.role === "main" ? "Main admin" : "Sub-admin"}
+              </div>
+            </DropdownMenuLabel>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => signOut()}>
+              <LogOut className="w-4 h-4 mr-2" /> Sign out
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
     </header>
   )

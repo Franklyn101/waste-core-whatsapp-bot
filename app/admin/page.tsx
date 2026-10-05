@@ -16,9 +16,24 @@ import  {WasteBagOrdersTable }  from "@/components/waste-bag-orders"
 import { UpgradeRequestsTable } from "@/components/upgrade-request-table"
 import { SupportTicketsTable } from "@/components/support-ticket-table"
 import { CollectorsManager } from "@/components/collectors-manager"
+import { SubAdminsManager } from "@/components/sub-admins-manager"
+import { AdminGate } from "@/components/admin-login"
+import { AdminAuthProvider, useAdminAuth } from "@/lib/admin-auth"
 
 
-export default function DashboardPage() {
+export default function AdminPage() {
+  return (
+    <AdminAuthProvider>
+      <AdminGate>
+        <DashboardPage />
+      </AdminGate>
+    </AdminAuthProvider>
+  )
+}
+
+function DashboardPage() {
+  const { profile } = useAdminAuth()
+  const isMainAdmin = profile?.role === "main"
   const [activeSection, setActiveSection] = useState("overview")
   const [searchQuery, setSearchQuery] = useState("")
   const [stats, setStats] = useState<DashboardStats>({
@@ -176,6 +191,19 @@ export default function DashboardPage() {
             <AnalyticsCharts />
           </div>
         )
+      case "sub-admins":
+        if (!isMainAdmin) return <div>Only the main admin can manage sub-admins.</div>
+        return (
+          <div className="space-y-6">
+            <div>
+              <h1 className="text-3xl font-bold text-balance">Sub-admins</h1>
+              <p className="text-muted-foreground mt-2">
+                Create staff logins, reset their passwords, and turn access on or off.
+              </p>
+            </div>
+            <SubAdminsManager />
+          </div>
+        )
       default:
         return <div>Section not found</div>
     }
@@ -184,7 +212,7 @@ export default function DashboardPage() {
   return (
     <div className="flex h-screen bg-background">
       {/* Sidebar */}
-      <DashboardSidebar activeSection={activeSection} onSectionChange={setActiveSection} />
+      <DashboardSidebar activeSection={activeSection} onSectionChange={setActiveSection} isMainAdmin={isMainAdmin} />
 
       {/* Main Content */}
       <div className="flex-1 flex flex-col overflow-hidden">
