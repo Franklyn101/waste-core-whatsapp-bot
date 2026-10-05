@@ -896,7 +896,12 @@ nextApp.prepare().then(() => {
       res.json({ setupRequired: !main.exists })
     } catch (err) {
       console.error("admin status failed:", err)
-      res.status(500).json({ error: "Could not check admin setup." })
+      // Include the Firestore error code (e.g. "16 UNAUTHENTICATED") so the
+      // dashboard can show why; it contains no credentials.
+      res.status(500).json({
+        error: "Could not check admin setup.",
+        detail: String(err?.code ?? "") + (err?.details ? ` ${err.details}` : ""),
+      })
     }
   })
 
