@@ -4,17 +4,33 @@ import { useMemo } from "react"
 import type { WasteRequest, UserData } from "@/lib/types"
 import type { FilterOptions } from "@/components/advanced-filters"
 
+const SEARCH_FIELDS = [
+  "customerName",
+  "customerPhone",
+  "address",
+  "deliveryAddress",
+  "wasteType",
+  "bagSize",
+  "plan",
+  "category",
+  "message",
+  "ticketId",
+  "serviceLabel",
+]
+
 export function useFilteredRequests(requests: WasteRequest[], filters: FilterOptions): WasteRequest[] {
   return useMemo(() => {
     return requests.filter((request) => {
       // Search query filter
       if (filters.searchQuery) {
         const query = filters.searchQuery.toLowerCase()
-        const matchesSearch =
-          request.name.toLowerCase().includes(query) ||
-          request.phoneNumber.includes(query) ||
-          request.address.toLowerCase().includes(query) ||
-          request.wasteType.toLowerCase().includes(query)
+        // Tables pass different record shapes (pickups, bag orders, tickets,
+        // receipts), so match against whichever text fields are present.
+        const record = request as unknown as Record<string, unknown>
+        const matchesSearch = SEARCH_FIELDS.some((field) => {
+          const value = record[field]
+          return typeof value === "string" && value.toLowerCase().includes(query)
+        })
 
         if (!matchesSearch) return false
       }
@@ -59,9 +75,9 @@ export function useFilteredUsers(users: UserData[], filters: FilterOptions): Use
       if (filters.searchQuery) {
         const query = filters.searchQuery.toLowerCase()
         const matchesSearch =
-          user.name.toLowerCase().includes(query) ||
-          user.phoneNumber.includes(query) ||
-          user.address.toLowerCase().includes(query)
+          (user.name ?? "").toLowerCase().includes(query) ||
+          (user.phoneNumber ?? "").includes(query) ||
+          (user.address ?? "").toLowerCase().includes(query)
 
         if (!matchesSearch) return false
       }
