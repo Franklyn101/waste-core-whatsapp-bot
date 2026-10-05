@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { collection, query, limit, onSnapshot, getDocs } from "firebase/firestore"
+import { collection, onSnapshot, getDocs } from "firebase/firestore"
 import { db } from "@/lib/firebase"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -31,6 +31,15 @@ const PLAN_PRICES: Record<string, number> = {
   premium: 35000,
 }
 
+// Missing/invalid dates fall back to epoch so they sort last.
+function toDate(value: any): Date {
+  let date: Date | null = null
+  if (typeof value === "string") date = new Date(value)
+  else if (value?.toDate) date = value.toDate()
+  else if (value instanceof Date) date = value
+  return date && !isNaN(date.getTime()) ? date : new Date(0)
+}
+
 export function UpgradeRequestsTable({ searchQuery = "" }: UpgradeRequestsTableProps) {
   const [requests, setRequests] = useState<UpgradeRequest[]>([])
   const [isLoading, setIsLoading] = useState(true)
@@ -52,7 +61,7 @@ export function UpgradeRequestsTable({ searchQuery = "" }: UpgradeRequestsTableP
     setDebugInfo("Starting Firestore connection...")
 
     // DIRECT RAW QUERY — bypasses FirebaseService entirely
-    const q = query(collection(db, "upgradeRequests"), limit(50))
+    const q = collection(db, "upgradeRequests")
 
     // Test 1: getDocs one-time fetch
     getDocs(q)
@@ -98,12 +107,12 @@ export function UpgradeRequestsTable({ searchQuery = "" }: UpgradeRequestsTableP
             startDate:         data.startDate ?? "",
             paymentReceiptUrl: data.paymentReceiptUrl ?? "",
             status:            data.status ?? "pending",
-            createdAt:         data.createdAt ? new Date(data.createdAt) : new Date(),
-            updatedAt:         data.updatedAt ? new Date(data.updatedAt) : new Date(),
+            createdAt:         toDate(data.createdAt),
+            updatedAt:         toDate(data.updatedAt || data.createdAt),
           }
         })
 
-        setRequests(normalized.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()))
+        setRequests(normalized.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()).slice(0, 50))
         setDebugInfo(`onSnapshot: ${snapshot.docs.length} doc(s) loaded ✓`)
         setIsLoading(false)
       },

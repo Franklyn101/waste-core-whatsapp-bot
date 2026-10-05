@@ -19,7 +19,7 @@ import {
 } from "lucide-react"
 import { AdvancedFilters, type FilterOptions } from "@/components/advanced-filters"
 import { useFilteredRequests } from "@/hooks/use-filtered-data"
-import { collection, query, limit, onSnapshot } from "firebase/firestore"
+import { collection, onSnapshot } from "firebase/firestore"
 import { db } from "@/lib/firebase"
 import { FirebaseService } from "@/lib/firebase-service"
 import type { SupportTicket } from "@/lib/types"
@@ -58,11 +58,11 @@ const QUICK_REPLIES: Record<string, string> = {
 }
 
 function parseDate(value: any): Date {
-  if (!value) return new Date()
-  if (typeof value === "string") return new Date(value)
-  if (value?.toDate) return value.toDate()
-  if (value instanceof Date) return value
-  return new Date()
+  let date: Date | null = null
+  if (typeof value === "string") date = new Date(value)
+  else if (value?.toDate) date = value.toDate()
+  else if (value instanceof Date) date = value
+  return date && !isNaN(date.getTime()) ? date : new Date(0)
 }
 
 // Strip "whatsapp:" prefix and format for wa.me link
@@ -96,7 +96,7 @@ export function SupportTicketsTable({ searchQuery = "" }: SupportTicketsTablePro
     setIsLoading(true)
     setError(null)
 
-    const q = query(collection(db, "supportTickets"), limit(100))
+    const q = collection(db, "supportTickets")
     const unsub = onSnapshot(
       q,
       (snapshot) => {
@@ -115,7 +115,7 @@ export function SupportTicketsTable({ searchQuery = "" }: SupportTicketsTablePro
             updatedAt:     parseDate(data.updatedAt || data.createdAt),
           } as SupportTicket
         })
-        setTickets([...raw].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()))
+        setTickets([...raw].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()).slice(0, 100))
         setIsLoading(false)
         setIsConnected(true)
       },

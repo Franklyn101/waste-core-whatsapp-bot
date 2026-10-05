@@ -75,7 +75,7 @@ export function PickupRequestsTable({ searchQuery = "" }: PickupRequestsTablePro
       setRequests(newRequests)
       setIsLoading(false)
       setIsConnected(true)
-    }, 100)
+    }, undefined, 100)
 
     const handleOffline = () => setIsConnected(false)
     const handleOnline = () => setIsConnected(true)

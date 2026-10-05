@@ -6,7 +6,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Badge } from "@/components/ui/badge"
 import { Phone, MapPin, Calendar, User, ShoppingBag, TrendingUp, Truck, HeadphonesIcon } from "lucide-react"
 import { AdvancedFilters, type FilterOptions } from "@/components/advanced-filters"
-import { collection, getDocs, query, limit } from "firebase/firestore"
+import { collection, getDocs } from "firebase/firestore"
 import { db } from "@/lib/firebase"
 
 interface ServiceCount {
@@ -75,7 +75,7 @@ async function fetchAllCustomers(): Promise<CustomerRecord[]> {
 
   await Promise.all(
     SERVICE_COLLECTIONS.map(async ({ col, label }) => {
-      const snap = await getDocs(query(collection(db, col), limit(500)))
+      const snap = await getDocs(collection(db, col))
       snap.docs.forEach((d) => {
         const data = d.data()
         const phone: string = data.customerPhone ?? ""

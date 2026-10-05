@@ -10,7 +10,7 @@ import {
 import { Eye, Download, User, Calendar, Package } from "lucide-react"
 import { AdvancedFilters, type FilterOptions } from "@/components/advanced-filters"
 import { useFilteredRequests } from "@/hooks/use-filtered-data"
-import { collection, getDocs, query, limit } from "firebase/firestore"
+import { collection, getDocs } from "firebase/firestore"
 import { db } from "@/lib/firebase"
 
 // Unified receipt shape pulled from all collections
@@ -41,11 +41,11 @@ const SERVICE_PRICES: Record<string, number> = {
 }
 
 function parseDate(value: any): Date {
-  if (!value) return new Date()
-  if (typeof value === "string") return new Date(value)
-  if (value?.toDate) return value.toDate()
-  if (value instanceof Date) return value
-  return new Date()
+  let date: Date | null = null
+  if (typeof value === "string") date = new Date(value)
+  else if (value?.toDate) date = value.toDate()
+  else if (value instanceof Date) date = value
+  return date && !isNaN(date.getTime()) ? date : new Date(0)
 }
 
 function serviceLabel(serviceType: string): string {
@@ -78,7 +78,7 @@ async function fetchAllReceipts(): Promise<ReceiptRecord[]> {
 
   await Promise.all(
     collections.map(async (col) => {
-      const snap = await getDocs(query(collection(db, col), limit(200)))
+      const snap = await getDocs(collection(db, col))
       snap.docs.forEach((d) => {
         const data = d.data()
         if (!data.paymentReceiptUrl) return // skip docs with no receipt
