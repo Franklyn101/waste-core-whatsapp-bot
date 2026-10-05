@@ -50,14 +50,12 @@ import {
 import {
   AlertCircle,
   Calendar,
-  CheckCircle2,
-  Loader2,
   ClipboardList,
   MapPin,
+  MessageCircle,
   MoreHorizontal,
   Pencil,
   Phone,
-  RotateCw,
   Trash2,
   UserPlus,
   Users,
@@ -86,6 +84,34 @@ const STATUS_BADGE: Record<string, string> = {
 }
 
 const EMPTY_FORM: CollectorInput = { name: "", phone: "", area: "", active: true }
+
+// WhatsApp needs the international number without "+": 08012345678 and
+// +234 801 234 5678 both become 2348012345678.
+function toWhatsAppNumber(phone: string): string {
+  const digits = phone.replace(/\D/g, "")
+  return digits.length === 11 && digits.startsWith("0") ? `234${digits.slice(1)}` : digits
+}
+
+function collectorMessage(pickup: CollectorPickup, collector: Collector): string {
+  const mapLink = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(pickup.address)}`
+  return [
+    `Hello ${collector.name}, you have a new WasteCore pickup.`,
+    "",
+    `Date: ${pickup.pickupDate || "N/A"}`,
+    `Customer: ${pickup.customerName || "N/A"}`,
+    `Phone: ${pickup.customerPhone || "N/A"}`,
+    `Address: ${pickup.address || "N/A"}`,
+    ...(pickup.address ? [`Map: ${mapLink}`] : []),
+    `Waste: ${pickup.wasteType || "N/A"}`,
+    `Service: ${pickup.serviceType || "N/A"}`,
+  ].join("\n")
+}
+
+// Click-to-chat link: opens the WhatsApp app (or WhatsApp Web) on the
+// collector's chat with the pickup details already typed in.
+function whatsAppLink(pickup: CollectorPickup, collector: Collector): string {
+  return `https://wa.me/${toWhatsAppNumber(collector.phone)}?text=${encodeURIComponent(collectorMessage(pickup, collector))}`
+}
 
 interface CollectorsManagerProps {
   searchQuery?: string
@@ -222,13 +248,11 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
   // ── Pickup assignment ─────────────────────────────────────────────────────
   const handleAssign = async (pickup: CollectorPickup, value: string) => {
     const collector = value === UNASSIGNED ? null : collectors.find((c) => c.id === value) ?? null
+    // Open WhatsApp before awaiting anything — browsers only allow new
+    // windows directly from the click.
+    if (collector) window.open(whatsAppLink(pickup, collector), "_blank", "noopener")
     const ok = await FirebaseService.assignPickup(pickup, collector)
     if (!ok) setError("Could not update the assignment. Please try again.")
-  }
-
-  const handleResend = async (pickup: CollectorPickup) => {
-    const ok = await FirebaseService.resendCollectorNotification(pickup)
-    if (!ok) setError("Could not resend the WhatsApp message. Please try again.")
   }
 
   const handleStatus = async (pickup: CollectorPickup, status: PickupStatus) => {
@@ -420,6 +444,7 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
                     // Keep a deleted/unknown collector visible instead of
                     // silently showing "Unassigned".
                     const known = !p.collectorId || collectors.some((c) => c.id === p.collectorId)
+                    const assignedCollector = collectors.find((c) => c.id === p.collectorId)
                     return (
                       <TableRow key={`${p.collection}_${p.id}`}>
                         <TableCell className="font-medium">{p.customerName || "—"}</TableCell>
@@ -462,8 +487,15 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
                                 ))}
                             </SelectContent>
                           </Select>
-                          {p.collectorId && known && p.status !== "completed" && p.status !== "cancelled" && (
-                            <CollectorNotice pickup={p} onResend={() => handleResend(p)} />
+                          {assignedCollector && (
+                            <a
+                              href={whatsAppLink(p, assignedCollector)}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="mt-1 inline-flex items-center gap-1 text-xs text-green-700 hover:underline"
+                            >
+                              <MessageCircle className="w-3 h-3" /> Send on WhatsApp
+                            </a>
                           )}
                         </TableCell>
                         <TableCell>
@@ -500,7 +532,7 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
           <DialogHeader>
             <DialogTitle>{editing ? "Edit collector" : "Register collector"}</DialogTitle>
             <DialogDescription>
-              The collector gets each assigned pickup&apos;s address and details on WhatsApp. Customers are never sent the collector&apos;s name.
+              Assigning a pickup opens WhatsApp with the pickup details ready to send to this number. Customers are never sent the collector&apos;s name.
             </DialogDescription>
           </DialogHeader>
           <form
@@ -574,37 +606,6 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </div>
-  )
-}
-
-// WhatsApp delivery state for the collector's assignment message.
-function CollectorNotice({ pickup, onResend }: { pickup: CollectorPickup; onResend: () => void }) {
-  const resend = (
-    <button type="button" onClick={onResend} className="inline-flex items-center gap-1 underline underline-offset-2">
-      <RotateCw className="w-3 h-3" /> Resend
-    </button>
-  )
-
-  if (pickup.collectorNotifyError) {
-    return (
-      <div className="mt-1 flex items-center gap-2 text-xs text-destructive" title={pickup.collectorNotifyError}>
-        <AlertCircle className="w-3 h-3" /> WhatsApp not sent · {resend}
-      </div>
-    )
-  }
-  if (pickup.collectorNotifiedAt) {
-    return (
-      <div className="mt-1 flex items-center gap-2 text-xs text-green-700">
-        <CheckCircle2 className="w-3 h-3" />
-        Sent on WhatsApp {pickup.collectorNotifiedAt.toLocaleString("en-NG", { dateStyle: "short", timeStyle: "short" })}
-        <span className="text-muted-foreground">· {resend}</span>
-      </div>
-    )
-  }
-  return (
-    <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
-      <Loader2 className="w-3 h-3 animate-spin" /> Sending WhatsApp…
     </div>
   )
 }

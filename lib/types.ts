@@ -51,6 +51,7 @@ export interface CollectorPickup {
   id: string
   collection: PickupCollection
   customerName: string
+  customerPhone: string
   address: string
   wasteType: string
   pickupDate: string
@@ -58,8 +59,5 @@ export interface CollectorPickup {
   status: string
   collectorId: string | null
   collectorName: string
-  // WhatsApp notification to the assigned collector, written by the server.
-  collectorNotifiedAt: Date | null
-  collectorNotifyError: string | null
   createdAt: Date
 }
