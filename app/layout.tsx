@@ -6,9 +6,9 @@ import './globals.css'
 import Navbar from '@/components/navbar'
 
 export const metadata: Metadata = {
-  title: 'waste connect',
-  description: 'Created with waste connect',
-  generator: 'waste connect',
+  title: 'WasteCore',
+  description: 'WasteCore admin dashboard',
+  generator: 'WasteCore',
 }
 
 export default function RootLayout({
