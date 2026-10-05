@@ -1,5 +1,6 @@
 "use client"
 
+import { useEffect, useState } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Truck, Clock, CheckCircle, Calendar, TrendingUp } from "lucide-react"
 import type { DashboardStats } from "@/lib/types"
@@ -10,7 +11,19 @@ interface DashboardStatsProps {
   lastUpdated?: Date
 }
 
+// Live clock — starts null so server and client render the same markup.
+function useNow(intervalMs = 1000): Date | null {
+  const [now, setNow] = useState<Date | null>(null)
+  useEffect(() => {
+    setNow(new Date())
+    const timer = setInterval(() => setNow(new Date()), intervalMs)
+    return () => clearInterval(timer)
+  }, [intervalMs])
+  return now
+}
+
 export function DashboardStatsCards({ stats, isLoading, lastUpdated }: DashboardStatsProps) {
+  const now = useNow()
   const statCards = [
     {
       title: "Total Requests",
@@ -64,12 +77,24 @@ export function DashboardStatsCards({ stats, isLoading, lastUpdated }: Dashboard
 
   return (
     <div className="space-y-4">
-      {lastUpdated && (
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <TrendingUp className="w-4 h-4 text-chart-1" />
-          <span>Last updated: {lastUpdated.toLocaleTimeString()}</span>
-        </div>
-      )}
+      <div className="flex flex-wrap items-center justify-between gap-2 text-sm text-muted-foreground">
+        {now && (
+          <div className="flex items-center gap-2">
+            <Calendar className="w-4 h-4 text-chart-4" />
+            <span>
+              {now.toLocaleDateString("en-NG", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
+              {" · "}
+              {now.toLocaleTimeString("en-NG")}
+            </span>
+          </div>
+        )}
+        {lastUpdated && (
+          <div className="flex items-center gap-2">
+            <TrendingUp className="w-4 h-4 text-chart-1" />
+            <span>Last updated: {lastUpdated.toLocaleTimeString("en-NG")}</span>
+          </div>
+        )}
+      </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         {statCards.map((stat) => {
