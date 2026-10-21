@@ -4,7 +4,7 @@ import { useState } from "react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
-import { LayoutDashboard, Truck, Ticket, Rocket, Trash, Zap, Users, Receipt, BarChart3, Menu, X, HardHat, UserCog } from "lucide-react"
+import { LayoutDashboard, Truck, Ticket, Rocket, Trash, Zap, Users, Receipt, BarChart3, Menu, X, HardHat, UserCog, CalendarClock } from "lucide-react"
 
 interface SidebarProps {
   activeSection: string
@@ -36,6 +36,11 @@ const navigationItems = [
     icon: Zap,
   },
 
+  {
+    id: "subscriptions",
+    label: "Subscriptions",
+    icon: CalendarClock,
+  },
   {
     id: "collectors",
     label: "Collectors",

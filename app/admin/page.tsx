@@ -17,6 +17,7 @@ import { UpgradeRequestsTable } from "@/components/upgrade-request-table"
 import { SupportTicketsTable } from "@/components/support-ticket-table"
 import { CollectorsManager } from "@/components/collectors-manager"
 import { SubAdminsManager } from "@/components/sub-admins-manager"
+import { SubscriptionsManager } from "@/components/subscriptions-manager"
 import { AdminGate } from "@/components/admin-login"
 import { AdminAuthProvider, useAdminAuth } from "@/lib/admin-auth"
 
@@ -117,6 +118,18 @@ function DashboardPage() {
         </p>
       </div>
       <InstantPickupTable searchQuery={searchQuery} />
+    </div>
+  )
+  case "subscriptions":
+    return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-2xl md:text-3xl font-bold text-balance">Subscriptions</h1>
+        <p className="text-muted-foreground mt-2">
+          Weekly and monthly pickup subscribers, their type of waste and pickup schedule.
+        </p>
+      </div>
+      <SubscriptionsManager searchQuery={searchQuery} />
     </div>
   )
   case "collectors":

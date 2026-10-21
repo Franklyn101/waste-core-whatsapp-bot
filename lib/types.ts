@@ -61,3 +61,32 @@ export interface CollectorPickup {
   collectorName: string
   createdAt: Date
 }
+
+export type SubscriberStatus = "active" | "paused" | "cancelled"
+
+export type SubscriberInput = {
+  customerName: string
+  customerPhone: string
+  address: string
+  wasteType: string
+  planId: string
+  pickupDays: string[]
+  timeWindow: string
+  startDate: string
+  status: SubscriberStatus
+  notes: string
+  // WhatsApp request this subscriber was created from (hides that row).
+  linkedRequestId?: string | null
+}
+
+// One row on the Subscriptions page: either registered by an admin
+// (`subscribers`, fully editable) or a WhatsApp booking (read-only).
+export interface SubscriptionRow extends SubscriberInput {
+  id: string
+  source: "admin" | "whatsapp"
+  collection: "subscribers" | "pickupRequests" | "upgradeRequests"
+  kind: "weekly" | "monthly"
+  // Raw status from the WhatsApp booking (pending, assigned, ...).
+  requestStatus?: string
+  createdAt: Date
+}
