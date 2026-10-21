@@ -23,7 +23,10 @@ import type {
   CollectorPickup,
   PickupCollection,
   PickupStatus,
+  SubscriberInput,
+  SubscriptionRow,
 } from "./types"
+import { findPlan } from "./subscriptions"
 
 // ======================
 // SAFE DATE PARSER
@@ -149,6 +152,59 @@ function normalizeCollectorPickup(data: any, id: string, col: PickupCollection):
     collectorId:   data.collectorId ?? null,
     collectorName: data.collectorName ?? "",
     createdAt:     parseDate(data.createdAt),
+  }
+}
+
+function normalizeSubscriber(data: any, id: string): SubscriptionRow {
+  const plan = findPlan(data.planId)
+  return {
+    id,
+    source: "admin",
+    collection: "subscribers",
+    kind: plan?.kind ?? "weekly",
+    customerName: data.customerName ?? "",
+    customerPhone: data.customerPhone ?? "",
+    address: data.address ?? "",
+    wasteType: data.wasteType ?? "",
+    planId: data.planId ?? "",
+    pickupDays: Array.isArray(data.pickupDays) ? data.pickupDays : [],
+    timeWindow: data.timeWindow ?? "",
+    startDate: data.startDate ?? "",
+    status: data.status ?? "active",
+    notes: data.notes ?? "",
+    linkedRequestId: data.linkedRequestId ?? null,
+    createdAt: parseDate(data.createdAt),
+  }
+}
+
+// WhatsApp bookings shown alongside admin-registered subscribers.
+function normalizeWhatsAppSubscription(
+  data: any,
+  id: string,
+  col: "pickupRequests" | "upgradeRequests"
+): SubscriptionRow | null {
+  const planId = col === "upgradeRequests"
+    ? (data.plan || String(data.serviceType ?? "").replace("upgrade_", ""))
+    : data.serviceType
+  const plan = findPlan(planId)
+  if (!plan) return null
+  return {
+    id,
+    source: "whatsapp",
+    collection: col,
+    kind: plan.kind,
+    customerName: data.customerName ?? "",
+    customerPhone: (data.customerPhone ?? "").replace(/^whatsapp:/i, ""),
+    address: data.address ?? "",
+    wasteType: data.wasteType ?? "",
+    planId: plan.id,
+    pickupDays: [],
+    timeWindow: "",
+    startDate: data.startDate ?? data.pickupDate ?? "",
+    status: data.status === "cancelled" ? "cancelled" : "active",
+    requestStatus: data.status ?? "pending",
+    notes: "",
+    createdAt: parseDate(data.createdAt),
   }
 }
 
@@ -459,5 +515,68 @@ export class FirebaseService {
       await updateDoc(doc(db, pickup.collection, pickup.id), { status, updatedAt: new Date().toISOString() })
       return true
     } catch (err) { console.error("pickup status update failed", err); return false }
+  }
+
+  // ── SUBSCRIPTIONS (weekly + monthly) ──────────────────────────────────────
+  // Admin-registered subscribers plus WhatsApp weekly bookings and monthly
+  // plan requests. A WhatsApp row is hidden once a subscriber links to it.
+  static subscribeToSubscriptions(
+    callback: (rows: SubscriptionRow[]) => void,
+    onError?: (err: Error) => void
+  ): () => void {
+    const parts: Record<string, SubscriptionRow[] | undefined> = {}
+    const sources = ["subscribers", "pickupRequests", "upgradeRequests"] as const
+
+    const emit = () => {
+      if (sources.some((col) => parts[col] === undefined)) return
+      const admin = parts.subscribers ?? []
+      const linked = new Set(admin.map((r) => r.linkedRequestId).filter(Boolean))
+      const whatsapp = [...(parts.pickupRequests ?? []), ...(parts.upgradeRequests ?? [])]
+        .filter((r) => !linked.has(r.id))
+      callback(sortByCreatedAt([...admin, ...whatsapp]))
+    }
+
+    const unsubs = sources.map((col) =>
+      onSnapshot(
+        collection(db, col),
+        (snapshot) => {
+          parts[col] = snapshot.docs
+            .map((d) => col === "subscribers"
+              ? normalizeSubscriber(d.data(), d.id)
+              : normalizeWhatsAppSubscription(d.data(), d.id, col))
+            .filter((r): r is SubscriptionRow => r !== null)
+          emit()
+        },
+        (err) => {
+          console.error(`${col} error:`, err)
+          parts[col] = []
+          emit()
+          onError?.(err)
+        }
+      )
+    )
+    return () => unsubs.forEach((u) => u())
+  }
+
+  static async createSubscriber(input: SubscriberInput): Promise<boolean> {
+    try {
+      const now = new Date().toISOString()
+      await addDoc(collection(db, "subscribers"), { ...input, createdAt: now, updatedAt: now })
+      return true
+    } catch (err) { console.error("subscriber create failed", err); return false }
+  }
+
+  static async updateSubscriber(id: string, input: SubscriberInput): Promise<boolean> {
+    try {
+      await updateDoc(doc(db, "subscribers", id), { ...input, updatedAt: new Date().toISOString() })
+      return true
+    } catch (err) { console.error("subscriber update failed", err); return false }
+  }
+
+  static async deleteSubscriber(id: string): Promise<boolean> {
+    try {
+      await deleteDoc(doc(db, "subscribers", id))
+      return true
+    } catch (err) { console.error("subscriber delete failed", err); return false }
   }
 }
