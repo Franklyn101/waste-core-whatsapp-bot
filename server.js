@@ -93,18 +93,31 @@ try {
 
 // ================= PRICING MAP =================
 const SERVICE_PRICES = {
-  instant: 2000,
+  instant: 3000,
   weekly_1: 1250,
   weekly_2: 2500,
   weekly_3: 3750,
+  // Business plans (monthly)
+  upgrade_starter: 5000,
+  upgrade_standard: 10000,
+  upgrade_premium: 15000,
+  // Retired plan, kept so older sessions and records still price correctly.
   upgrade_basic: 12000,
-  upgrade_standard: 20000,
-  upgrade_premium: 35000,
   wasteBags_small: 500,
   wasteBags_medium: 900,
   wasteBags_large: 1500,
   support: 0,
 }
+
+const BUSINESS_PLANS_MENU =
+  `WasteCore Business Plans (monthly)\n\n` +
+  `1 - Starter  NGN 5,000/month\n` +
+  `   1 pickup per week. For small shops, tailors, pharmacies. All waste types accepted.\n\n` +
+  `2 - Standard  NGN 10,000/month\n` +
+  `   2 pickups per week, priority scheduling, monthly waste summary.\n\n` +
+  `3 - Premium  NGN 15,000/month\n` +
+  `   3 pickups per week, faster response times, compliance & impact summary.\n\n` +
+  `All plans are eligible for Waste Recovery Credit.\n\nReply 1, 2, or 3.`
 
 const WEEKLY_PLAN_LABELS = {
   weekly_1: "1 pickup/week",
@@ -576,7 +589,7 @@ nextApp.prepare().then(() => {
           session.data.name = msg.substring(0, 100)
           if (!session.data.serviceType) {
             await send(
-              `Choose service:\n1 - Instant Pickup (NGN 2,000)\n2 - Weekly Pickup\n3 - Upgrade Plan\n4 - Order Waste Bags\n5 - Speak to Support`
+              `Choose service:\n1 - Instant Pickup (NGN 3,000)\n2 - Weekly Pickup\n3 - Business Plans (monthly)\n4 - Order Waste Bags\n5 - Speak to Support`
             )
             session.step = "1.5"
           } else {
@@ -587,7 +600,7 @@ nextApp.prepare().then(() => {
               await send(`Choose your weekly pickup plan:\n\n1 - 1 pickup/week (NGN 1,250/week)\n2 - 2 pickups/week (NGN 2,500/week)\n3 - 3 pickups/week (NGN 3,750/week)\n\nReply 1, 2, or 3.`)
               session.step = "weekly_plan_choose"
             } else if (prompt === "__show_upgrade_menu__") {
-              await send(`Available Upgrade Plans\n\n1 - Basic  NGN 12,000/mo\n   Weekly pickup, up to 5 bags\n\n2 - Standard  NGN 20,000/mo\n   3x/week pickup, up to 15 bags, priority support\n\n3 - Premium  NGN 35,000/mo\n   Daily pickup, unlimited bags, dedicated driver, free bags monthly\n\nReply 1, 2, or 3.`)
+              await send(BUSINESS_PLANS_MENU)
               session.step = "upgrade_select"
             } else if (prompt === "__show_bags_menu__") {
               await send(`Waste Bag Sizes\n\n1 - Small  NGN 500 (pack of 10)\n2 - Medium  NGN 900 (pack of 10)\n3 - Large  NGN 1,500 (pack of 10)\n\nReply 1, 2, or 3.`)
@@ -616,7 +629,7 @@ nextApp.prepare().then(() => {
               await send(`Choose your weekly pickup plan:\n\n1 - 1 pickup/week (NGN 1,250/week)\n2 - 2 pickups/week (NGN 2,500/week)\n3 - 3 pickups/week (NGN 3,750/week)\n\nReply 1, 2, or 3.`)
               session.step = "weekly_plan_choose"
             } else if (prompt === "__show_upgrade_menu__") {
-              await send(`Available Upgrade Plans\n\n1 - Basic  NGN 12,000/mo\n   Weekly pickup, up to 5 bags\n\n2 - Standard  NGN 20,000/mo\n   3x/week, up to 15 bags, priority support\n\n3 - Premium  NGN 35,000/mo\n   Daily pickup, unlimited bags, dedicated driver, free bags monthly\n\nReply 1, 2, or 3.`)
+              await send(BUSINESS_PLANS_MENU)
               session.step = "upgrade_select"
             } else if (prompt === "__show_bags_menu__") {
               await send(`Waste Bag Sizes\n\n1 - Small  NGN 500 (pack of 10)\n2 - Medium  NGN 900 (pack of 10)\n3 - Large  NGN 1,500 (pack of 10)\n\nReply 1, 2, or 3.`)
@@ -700,12 +713,12 @@ nextApp.prepare().then(() => {
 
         // ── UPGRADE PLAN FLOW ──────────────────────────────────────────────
         case "upgrade_choose":
-          await send(`Available Upgrade Plans\n\n1 - Basic  NGN 12,000/mo\n   Weekly pickup, up to 5 bags\n\n2 - Standard  NGN 20,000/mo\n   3x/week, up to 15 bags, priority support\n\n3 - Premium  NGN 35,000/mo\n   Daily pickup, unlimited bags, dedicated driver, free bags monthly\n\nReply 1, 2, or 3.`)
+          await send(BUSINESS_PLANS_MENU)
           session.step = "upgrade_select"
           break
 
         case "upgrade_select":
-          if      (msg === "1") session.data.upgradePlan = "basic"
+          if      (msg === "1") session.data.upgradePlan = "starter"
           else if (msg === "2") session.data.upgradePlan = "standard"
           else if (msg === "3") session.data.upgradePlan = "premium"
           else { await send("Please reply 1, 2, or 3."); break }
@@ -752,7 +765,7 @@ nextApp.prepare().then(() => {
               updatedAt: new Date().toISOString(),
             })
             await send(
-              `Upgrade request received!\n\nPlan: ${session.data.upgradePlan.toUpperCase()}\nAddress: ${session.data.address}\nStart Date: ${session.data.startDate}\nPayment received\n\nOur team will activate your plan within 24 hours.`
+              `Business plan request received!\n\nPlan: ${session.data.upgradePlan.toUpperCase()}\nAddress: ${session.data.address}\nStart Date: ${session.data.startDate}\nPayment received\n\nOur team will activate your plan within 24 hours.`
             )
           }
           session.step = "done"

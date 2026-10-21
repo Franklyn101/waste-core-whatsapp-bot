@@ -161,9 +161,9 @@ function DashboardPage() {
       return (
         <div className="space-y-6">
       <div>
-        <h1 className="text-2xl md:text-3xl font-bold text-balance">Upgrade Plans</h1>
+        <h1 className="text-2xl md:text-3xl font-bold text-balance">Business Plans</h1>
         <p className="text-muted-foreground mt-2">
-          Manage and track all upgrade plan requests from WhatsApp.
+          Manage and track all business plan requests from WhatsApp.
         </p>
       </div>
       <UpgradeRequestsTable searchQuery={searchQuery} />

@@ -30,11 +30,12 @@ interface ReceiptRecord {
 }
 
 const SERVICE_PRICES: Record<string, number> = {
-  instant:          2000,
+  instant:          3000,
   monthly:          10000,
-  upgrade_basic:    12000,
-  upgrade_standard: 20000,
-  upgrade_premium:  35000,
+  upgrade_starter:  5000,
+  upgrade_standard: 10000,
+  upgrade_premium:  15000,
+  upgrade_basic:    12000, // retired plan
   wasteBags_small:  500,
   wasteBags_medium: 900,
   wasteBags_large:  1500,

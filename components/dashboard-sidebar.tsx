@@ -53,7 +53,7 @@ const navigationItems = [
   },
   {
     id: "upgrade-plans",
-    label: "Upgrade Plans",
+    label: "Business Plans",
     icon: Rocket,
   },
 

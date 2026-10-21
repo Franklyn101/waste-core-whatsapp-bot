@@ -26,9 +26,10 @@ interface UpgradeRequestsTableProps {
 }
 
 const PLAN_PRICES: Record<string, number> = {
-  basic: 12000,
-  standard: 20000,
-  premium: 35000,
+  starter: 5000,
+  standard: 10000,
+  premium: 15000,
+  basic: 12000, // retired plan
 }
 
 // Missing/invalid dates fall back to epoch so they sort last.

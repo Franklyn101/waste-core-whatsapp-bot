@@ -10,15 +10,19 @@ export interface SubscriptionPlan {
   priceUnit: "week" | "month"
   // Pickups per week; the schedule must pick exactly this many days.
   pickupsPerWeek: number
+  // Retired plan: still shown on old records, not offered for new ones.
+  legacy?: boolean
 }
 
 export const SUBSCRIPTION_PLANS: SubscriptionPlan[] = [
   { id: "weekly_1", kind: "weekly", label: "1 pickup/week", price: 1250, priceUnit: "week", pickupsPerWeek: 1 },
   { id: "weekly_2", kind: "weekly", label: "2 pickups/week", price: 2500, priceUnit: "week", pickupsPerWeek: 2 },
   { id: "weekly_3", kind: "weekly", label: "3 pickups/week", price: 3750, priceUnit: "week", pickupsPerWeek: 3 },
-  { id: "basic", kind: "monthly", label: "Basic", price: 12000, priceUnit: "month", pickupsPerWeek: 1 },
-  { id: "standard", kind: "monthly", label: "Standard", price: 20000, priceUnit: "month", pickupsPerWeek: 3 },
-  { id: "premium", kind: "monthly", label: "Premium", price: 35000, priceUnit: "month", pickupsPerWeek: 7 },
+  // Business plans (monthly)
+  { id: "starter", kind: "monthly", label: "Starter", price: 5000, priceUnit: "month", pickupsPerWeek: 1 },
+  { id: "standard", kind: "monthly", label: "Standard", price: 10000, priceUnit: "month", pickupsPerWeek: 2 },
+  { id: "premium", kind: "monthly", label: "Premium", price: 15000, priceUnit: "month", pickupsPerWeek: 3 },
+  { id: "basic", kind: "monthly", label: "Basic (old plan)", price: 12000, priceUnit: "month", pickupsPerWeek: 1, legacy: true },
 ]
 
 export function findPlan(id: string | undefined): SubscriptionPlan | undefined {

@@ -155,7 +155,7 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
   // ── Form ──────────────────────────────────────────────────────────────────
   const openCreate = () => {
     setEditingId(null)
-    setForm({ ...EMPTY_FORM, planId: kind === "weekly" ? "weekly_1" : "basic", startDate: todayIso() })
+    setForm({ ...EMPTY_FORM, planId: kind === "weekly" ? "weekly_1" : "starter", startDate: todayIso() })
     setFormError(null)
     setFormOpen(true)
   }
@@ -250,7 +250,9 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
     if (!ok) setError(`Could not delete ${target.customerName}. Please try again.`)
   }
 
-  const plansForKind = (k: SubscriptionKind) => SUBSCRIPTION_PLANS.filter((p) => p.kind === k)
+  // Retired plans stay selectable only for a record already on them.
+  const plansForKind = (k: SubscriptionKind) =>
+    SUBSCRIPTION_PLANS.filter((p) => p.kind === k && (!p.legacy || p.id === form.planId))
   const formKind = plan?.kind ?? "weekly"
   const wasteOptions = WASTE_TYPES.includes(form.wasteType) || !form.wasteType
     ? WASTE_TYPES
@@ -480,12 +482,12 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
                 <Label>Subscription</Label>
                 <Select
                   value={formKind}
-                  onValueChange={(v) => setPlan(v === "weekly" ? "weekly_1" : "basic")}
+                  onValueChange={(v) => setPlan(v === "weekly" ? "weekly_1" : "starter")}
                 >
                   <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="weekly">Weekly pickup</SelectItem>
-                    <SelectItem value="monthly">Monthly plan</SelectItem>
+                    <SelectItem value="monthly">Monthly business plan</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
