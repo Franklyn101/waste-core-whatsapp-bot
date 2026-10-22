@@ -62,6 +62,7 @@ import {
 import { FirebaseService } from "@/lib/firebase-service"
 import type { SubscriberInput, SubscriberStatus, SubscriptionRow } from "@/lib/types"
 import {
+  SUBSCRIPTION_KINDS,
   SUBSCRIPTION_PLANS,
   TIME_WINDOWS,
   WASTE_TYPES,
@@ -116,7 +117,7 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
   const [rows, setRows] = useState<SubscriptionRow[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [kind, setKind] = useState<SubscriptionKind>("weekly")
+  const [kind, setKind] = useState<SubscriptionKind>("business")
   const [statusFilter, setStatusFilter] = useState<string>(ALL)
 
   const [formOpen, setFormOpen] = useState(false)
@@ -145,8 +146,8 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
   const stats = useMemo(() => {
     const active = rows.filter((r) => r.status === "active")
     return {
-      weekly: active.filter((r) => r.kind === "weekly").length,
-      monthly: active.filter((r) => r.kind === "monthly").length,
+      business: active.filter((r) => r.kind === "business").length,
+      household: active.filter((r) => r.kind === "household").length,
       today: active.filter((r) => r.pickupDays.includes(todayName)).length,
       unscheduled: active.filter((r) => r.source === "whatsapp").length,
     }
@@ -155,7 +156,7 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
   // ── Form ──────────────────────────────────────────────────────────────────
   const openCreate = () => {
     setEditingId(null)
-    setForm({ ...EMPTY_FORM, planId: kind === "weekly" ? "weekly_1" : "basic", startDate: todayIso() })
+    setForm({ ...EMPTY_FORM, planId: kind === "household" ? "household_1" : "business_1", startDate: todayIso() })
     setFormError(null)
     setFormOpen(true)
   }
@@ -250,8 +251,12 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
     if (!ok) setError(`Could not delete ${target.customerName}. Please try again.`)
   }
 
-  const plansForKind = (k: SubscriptionKind) => SUBSCRIPTION_PLANS.filter((p) => p.kind === k)
-  const formKind = plan?.kind ?? "weekly"
+  // Retired plans stay selectable only for a record already on them.
+  const plansForKind = (k: SubscriptionKind) =>
+    SUBSCRIPTION_PLANS.filter((p) => p.kind === k && (!p.legacy || p.id === form.planId))
+  const formKind = plan?.kind ?? "business"
+  // Retired weekly plans: only show the tab when there are records on them.
+  const visibleKinds = SUBSCRIPTION_KINDS.filter((k) => k.id !== "weekly" || rows.some((r) => r.kind === "weekly"))
   const wasteOptions = WASTE_TYPES.includes(form.wasteType) || !form.wasteType
     ? WASTE_TYPES
     : [form.wasteType, ...WASTE_TYPES]
@@ -279,8 +284,8 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
       )}
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4 md:gap-4">
-        <SummaryCard label="Active weekly" value={stats.weekly} />
-        <SummaryCard label="Active monthly" value={stats.monthly} />
+        <SummaryCard label="Active business" value={stats.business} />
+        <SummaryCard label="Active household" value={stats.household} />
         <SummaryCard label={`Pickups today (${todayName})`} value={stats.today} />
         <SummaryCard label="Need a schedule" value={stats.unscheduled} hint="WhatsApp bookings" />
       </div>
@@ -290,12 +295,11 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
           <CardTitle className="flex flex-wrap items-center justify-between gap-3">
             <Tabs value={kind} onValueChange={(v) => setKind(v as SubscriptionKind)}>
               <TabsList>
-                <TabsTrigger value="weekly">
-                  Weekly ({rows.filter((r) => r.kind === "weekly").length})
-                </TabsTrigger>
-                <TabsTrigger value="monthly">
-                  Monthly ({rows.filter((r) => r.kind === "monthly").length})
-                </TabsTrigger>
+                {visibleKinds.map((k) => (
+                  <TabsTrigger key={k.id} value={k.id}>
+                    {k.label} ({rows.filter((r) => r.kind === k.id).length})
+                  </TabsTrigger>
+                ))}
               </TabsList>
             </Tabs>
             <div className="flex flex-wrap gap-2">
@@ -354,6 +358,7 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
                     </TableCell>
                     <TableCell>
                       <div className="text-sm font-medium">{rowPlan?.label ?? r.planId}</div>
+                      {rowPlan?.legacy && <div className="text-[11px] text-muted-foreground">Retired plan</div>}
                       {rowPlan && <div className="text-xs text-muted-foreground">{planPriceLabel(rowPlan)}</div>}
                     </TableCell>
                     <TableCell>
@@ -480,12 +485,13 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
                 <Label>Subscription</Label>
                 <Select
                   value={formKind}
-                  onValueChange={(v) => setPlan(v === "weekly" ? "weekly_1" : "basic")}
+                  onValueChange={(v) => setPlan(v === "household" ? "household_1" : v === "weekly" ? form.planId : "business_1")}
                 >
                   <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="weekly">Weekly pickup</SelectItem>
-                    <SelectItem value="monthly">Monthly plan</SelectItem>
+                    <SelectItem value="business">Business (monthly)</SelectItem>
+                    <SelectItem value="household">Household (monthly)</SelectItem>
+                    {formKind === "weekly" && <SelectItem value="weekly">Weekly (old plan)</SelectItem>}
                   </SelectContent>
                 </Select>
               </div>

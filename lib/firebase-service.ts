@@ -63,6 +63,7 @@ function normalizeRequest(data: any, id: string): WasteRequest {
     paymentReceiptUrl: data.paymentReceiptUrl ?? "",
     status:            data.status ?? "pending",
     serviceType:       data.serviceType ?? "instant",
+    timeWindow:        data.timeWindow ?? "",
     createdAt,
     updatedAt,
   }
@@ -161,7 +162,7 @@ function normalizeSubscriber(data: any, id: string): SubscriptionRow {
     id,
     source: "admin",
     collection: "subscribers",
-    kind: plan?.kind ?? "weekly",
+    kind: plan?.kind ?? "business",
     customerName: data.customerName ?? "",
     customerPhone: data.customerPhone ?? "",
     address: data.address ?? "",

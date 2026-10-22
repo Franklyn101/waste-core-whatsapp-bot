@@ -21,25 +21,24 @@ const navigationItems = [
     icon: LayoutDashboard,
   },
   {
-    id: "pickup-requests",
-    label: "Pickup Requests",
-    icon: Truck,
-  },
-  {
-    id: "users",
-    label: "User Data",
-    icon: Users,
-  },
-  {
     id: "instant-pickups",
     label: "Instant Pickups",
     icon: Zap,
   },
-
+  {
+    id: "pickup-requests",
+    label: "Scheduled Pickups",
+    icon: Truck,
+  },
   {
     id: "subscriptions",
     label: "Subscriptions",
     icon: CalendarClock,
+  },
+  {
+    id: "upgrade-plans",
+    label: "Plan Requests",
+    icon: Rocket,
   },
   {
     id: "collectors",
@@ -47,16 +46,15 @@ const navigationItems = [
     icon: HardHat,
   },
   {
-    id: "waste-bag-orders",
-    label: "Waste Bag Orders",
-    icon:  Trash,
+    id: "users",
+    label: "User Data",
+    icon: Users,
   },
   {
-    id: "upgrade-plans",
-    label: "Upgrade Plans",
-    icon: Rocket,
+    id: "waste-bag-orders",
+    label: "Waste Bag Orders",
+    icon: Trash,
   },
-
   {
     id: "payments",
     label: "Payment Receipts",
@@ -66,7 +64,6 @@ const navigationItems = [
     id: "support-tickets",
     label: "Support Tickets",
     icon: Ticket,
-
   },
   {
     id: "analytics",

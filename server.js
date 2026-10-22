@@ -93,7 +93,16 @@ try {
 
 // ================= PRICING MAP =================
 const SERVICE_PRICES = {
-  instant: 2000,
+  instant: 3000,
+  scheduled: 3000,
+  // Monthly subscriptions
+  upgrade_business_1: 5000,
+  upgrade_business_2: 10000,
+  upgrade_business_3: 15000,
+  upgrade_household_1: 3000,
+  upgrade_household_2: 6000,
+  upgrade_household_3: 9000,
+  // Retired plans, kept so older sessions and records still price correctly.
   weekly_1: 1250,
   weekly_2: 2500,
   weekly_3: 3750,
@@ -104,6 +113,63 @@ const SERVICE_PRICES = {
   wasteBags_medium: 900,
   wasteBags_large: 1500,
   support: 0,
+}
+
+const SERVICE_MENU =
+  `Choose service:\n` +
+  `1 - Instant Pickup (NGN 3,000)\n` +
+  `2 - Schedule a Pickup (NGN 3,000)\n` +
+  `3 - Monthly Subscription\n` +
+  `4 - Order Waste Bags\n` +
+  `5 - Speak to Support`
+
+// Monthly subscription plans, by category. Plan ids are "<category>_<pickups per week>".
+const MONTHLY_PLANS = {
+  business: {
+    title: "Business",
+    blurb: "For shops, offices, salons, pharmacies and other businesses.",
+    footer: "Business plans include priority scheduling and are eligible for Waste Recovery Credit.",
+    prices: { 1: 5000, 2: 10000, 3: 15000 },
+  },
+  household: {
+    title: "Household",
+    blurb: "For homes and families.",
+    footer: "",
+    prices: { 1: 3000, 2: 6000, 3: 9000 },
+  },
+}
+
+const SUBSCRIPTION_CATEGORY_MENU =
+  `Monthly Subscription\n\n` +
+  `1 - Business\n   ${MONTHLY_PLANS.business.blurb}\n\n` +
+  `2 - Household\n   ${MONTHLY_PLANS.household.blurb}\n\n` +
+  `Reply 1 or 2.`
+
+function monthlyPlansMenu(category) {
+  const c = MONTHLY_PLANS[category]
+  const lines = [1, 2, 3].map((n) =>
+    `${n} - NGN ${c.prices[n].toLocaleString()}/month  (${n} pickup${n > 1 ? "s" : ""} per week)`
+  )
+  return `${c.title} Plans\n\n${lines.join("\n")}\n\n${c.footer ? c.footer + "\n\n" : ""}Reply 1, 2, or 3.`
+}
+
+// "business_2" -> "Business - 2 pickups/week"
+function monthlyPlanLabel(planId) {
+  const [category, n] = String(planId).split("_")
+  const c = MONTHLY_PLANS[category]
+  if (!c) return String(planId).toUpperCase()
+  return `${c.title} - ${n} pickup${n === "1" ? "" : "s"}/week`
+}
+
+const PICKUP_TIME_WINDOWS = {
+  1: "Morning (8am-12pm)",
+  2: "Afternoon (12pm-4pm)",
+  3: "Evening (4pm-7pm)",
+}
+
+const PICKUP_SERVICE_LABELS = {
+  instant: "Instant Pickup",
+  scheduled: "Scheduled Pickup",
 }
 
 const WEEKLY_PLAN_LABELS = {
@@ -272,28 +338,6 @@ function setupStatusListeners() {
 }
 
 // ================= HELPERS =================
-function routeAfterService(serviceType) {
-  switch (serviceType) {
-    case "instant":    return "pickup_address"
-    case "weekly":     return "weekly_plan_select"
-    case "upgrade":    return "upgrade_choose"
-    case "wasteBags":  return "bags_choose"
-    case "support":    return "support_category"
-    default:           return "pickup_address"
-  }
-}
-
-function promptForStep(step) {
-  switch (step) {
-    case "pickup_address":      return "Your pickup address?"
-    case "weekly_plan_select":  return "__show_weekly_menu__"
-    case "upgrade_choose":      return "__show_upgrade_menu__"
-    case "bags_choose":         return "__show_bags_menu__"
-    case "support_category":    return "__show_support_menu__"
-    default:                    return "Please continue."
-  }
-}
-
 // ================= START SERVER =================
 nextApp.prepare().then(() => {
   const app = express()
@@ -504,6 +548,31 @@ nextApp.prepare().then(() => {
 
     const send = (text) => sendWhatsAppMessage(from, text)
 
+    // Sends the first question of the chosen service and moves to its step.
+    const beginService = async () => {
+      switch (session.data.serviceType) {
+        case "upgrade":
+          await send(SUBSCRIPTION_CATEGORY_MENU)
+          session.step = "plan_category"
+          break
+        case "wasteBags":
+          await send(`Waste Bag Sizes\n\n1 - Small  NGN 500 (pack of 10)\n2 - Medium  NGN 900 (pack of 10)\n3 - Large  NGN 1,500 (pack of 10)\n\nReply 1, 2, or 3.`)
+          session.step = "bags_select"
+          break
+        case "support":
+          await send(`Support Categories\n\n1 - Missed Pickup\n2 - Billing Issue\n3 - Driver Complaint\n4 - Change Pickup Date\n5 - Other\n\nReply with a number.`)
+          session.step = "support_select"
+          break
+        default: // instant, scheduled
+          await send("Your pickup address?")
+          session.step = "pickup_address"
+      }
+    }
+
+    const sendPickupPayment = () => send(
+      `Thank you ${session.data.name}!\n\nPlease make payment to:\nBank: Moniepoint\nAccount Name: WasteCore Limited\nAccount Number: 6614999315\n\nAmount: NGN ${SERVICE_PRICES[session.data.serviceType].toLocaleString()}\n\nAfter payment, upload your payment receipt image.`
+    )
+
     try {
       // ── Active request check (only at conversation start) ────────────────
       if (session.step === "0" || session.step === "0.5") {
@@ -575,62 +644,25 @@ nextApp.prepare().then(() => {
         case "1":
           session.data.name = msg.substring(0, 100)
           if (!session.data.serviceType) {
-            await send(
-              `Choose service:\n1 - Instant Pickup (NGN 2,000)\n2 - Weekly Pickup\n3 - Upgrade Plan\n4 - Order Waste Bags\n5 - Speak to Support`
-            )
+            await send(SERVICE_MENU)
             session.step = "1.5"
           } else {
-            const nextStep = routeAfterService(session.data.serviceType)
-            session.step = nextStep
-            const prompt = promptForStep(nextStep)
-            if (prompt === "__show_weekly_menu__") {
-              await send(`Choose your weekly pickup plan:\n\n1 - 1 pickup/week (NGN 1,250/week)\n2 - 2 pickups/week (NGN 2,500/week)\n3 - 3 pickups/week (NGN 3,750/week)\n\nReply 1, 2, or 3.`)
-              session.step = "weekly_plan_choose"
-            } else if (prompt === "__show_upgrade_menu__") {
-              await send(`Available Upgrade Plans\n\n1 - Basic  NGN 12,000/mo\n   Weekly pickup, up to 5 bags\n\n2 - Standard  NGN 20,000/mo\n   3x/week pickup, up to 15 bags, priority support\n\n3 - Premium  NGN 35,000/mo\n   Daily pickup, unlimited bags, dedicated driver, free bags monthly\n\nReply 1, 2, or 3.`)
-              session.step = "upgrade_select"
-            } else if (prompt === "__show_bags_menu__") {
-              await send(`Waste Bag Sizes\n\n1 - Small  NGN 500 (pack of 10)\n2 - Medium  NGN 900 (pack of 10)\n3 - Large  NGN 1,500 (pack of 10)\n\nReply 1, 2, or 3.`)
-              session.step = "bags_select"
-            } else if (prompt === "__show_support_menu__") {
-              await send(`Support Categories\n\n1 - Missed Pickup\n2 - Billing Issue\n3 - Driver Complaint\n4 - Change Pickup Date\n5 - Other\n\nReply with a number.`)
-              session.step = "support_select"
-            } else {
-              await send(prompt)
-            }
+            await beginService()
           }
           break
 
         case "1.5":
           if      (msg === "1") session.data.serviceType = "instant"
-          else if (msg === "2") session.data.serviceType = "weekly"
+          else if (msg === "2") session.data.serviceType = "scheduled"
           else if (msg === "3") session.data.serviceType = "upgrade"
           else if (msg === "4") session.data.serviceType = "wasteBags"
           else if (msg === "5") session.data.serviceType = "support"
           else { await send("Reply 1-5."); break }
-          {
-            const nextStep = routeAfterService(session.data.serviceType)
-            session.step = nextStep
-            const prompt = promptForStep(nextStep)
-            if (prompt === "__show_weekly_menu__") {
-              await send(`Choose your weekly pickup plan:\n\n1 - 1 pickup/week (NGN 1,250/week)\n2 - 2 pickups/week (NGN 2,500/week)\n3 - 3 pickups/week (NGN 3,750/week)\n\nReply 1, 2, or 3.`)
-              session.step = "weekly_plan_choose"
-            } else if (prompt === "__show_upgrade_menu__") {
-              await send(`Available Upgrade Plans\n\n1 - Basic  NGN 12,000/mo\n   Weekly pickup, up to 5 bags\n\n2 - Standard  NGN 20,000/mo\n   3x/week, up to 15 bags, priority support\n\n3 - Premium  NGN 35,000/mo\n   Daily pickup, unlimited bags, dedicated driver, free bags monthly\n\nReply 1, 2, or 3.`)
-              session.step = "upgrade_select"
-            } else if (prompt === "__show_bags_menu__") {
-              await send(`Waste Bag Sizes\n\n1 - Small  NGN 500 (pack of 10)\n2 - Medium  NGN 900 (pack of 10)\n3 - Large  NGN 1,500 (pack of 10)\n\nReply 1, 2, or 3.`)
-              session.step = "bags_select"
-            } else if (prompt === "__show_support_menu__") {
-              await send(`Support Categories\n\n1 - Missed Pickup\n2 - Billing Issue\n3 - Driver Complaint\n4 - Change Pickup Date\n5 - Other\n\nReply with a number.`)
-              session.step = "support_select"
-            } else {
-              await send(prompt)
-            }
-          }
+          await beginService()
           break
 
-        // ── WEEKLY PICKUP PLAN SELECTION ───────────────────────────────────
+        // ── WEEKLY PICKUP PLAN SELECTION (retired) ─────────────────────────
+        // No longer offered; kept so conversations already at this step finish.
         case "weekly_plan_select":
           await send(`Choose your weekly pickup plan:\n\n1 - 1 pickup/week (NGN 1,250/week)\n2 - 2 pickups/week (NGN 2,500/week)\n3 - 3 pickups/week (NGN 3,750/week)\n\nReply 1, 2, or 3.`)
           session.step = "weekly_plan_choose"
@@ -646,7 +678,7 @@ nextApp.prepare().then(() => {
           session.step = "pickup_address"
           break
 
-        // ── INSTANT & WEEKLY PICKUP FLOW ───────────────────────────────────
+        // ── INSTANT & SCHEDULED PICKUP FLOW ────────────────────────────────
         case "pickup_address":
           session.data.address = msg.substring(0, 300)
           await send("Waste type?\n\n1 - Organic\n2 - Plastic\n3 - Paper\n4 - Fabric\n\nOr type the name of your waste.")
@@ -655,7 +687,11 @@ nextApp.prepare().then(() => {
 
         case "pickup_waste":
           session.data.wasteType = msg.substring(0, 100)
-          await send("Pickup start date (YYYY-MM-DD)?")
+          await send(
+            session.data.serviceType === "scheduled"
+              ? "Which date should we come? (YYYY-MM-DD, e.g. 2026-03-30)"
+              : "Pickup date (YYYY-MM-DD)?"
+          )
           session.step = "pickup_date"
           break
 
@@ -664,10 +700,26 @@ nextApp.prepare().then(() => {
             await send("Invalid date. Please use YYYY-MM-DD e.g. 2026-03-30.")
             break
           }
+          if (session.data.serviceType === "scheduled") {
+            const today = new Date().toISOString().slice(0, 10)
+            if (msg < today) {
+              await send("That date has passed. Please choose today or a future date (YYYY-MM-DD).")
+              break
+            }
+            session.data.pickupDate = msg
+            await send("Preferred pickup time?\n\n1 - Morning (8am-12pm)\n2 - Afternoon (12pm-4pm)\n3 - Evening (4pm-7pm)\n\nReply 1, 2, or 3.")
+            session.step = "pickup_time"
+            break
+          }
           session.data.pickupDate = msg
-          await send(
-            `Thank you ${session.data.name}!\n\nPlease make payment to:\nBank: Moniepoint\nAccount Name: WasteCore Limited\nAccount Number: 6614999315\n\nAmount: NGN ${SERVICE_PRICES[session.data.serviceType].toLocaleString()}\n\nAfter payment, upload your payment receipt image.`
-          )
+          await sendPickupPayment()
+          session.step = "pickup_payment"
+          break
+
+        case "pickup_time":
+          if (!PICKUP_TIME_WINDOWS[msg]) { await send("Please reply 1, 2, or 3."); break }
+          session.data.timeWindow = PICKUP_TIME_WINDOWS[msg]
+          await sendPickupPayment()
           session.step = "pickup_payment"
           break
 
@@ -676,13 +728,16 @@ nextApp.prepare().then(() => {
           {
             const receiptUrl = await handleReceiptUpload(mediaId, from)
             const col = session.data.serviceType === "instant" ? "instantPickups" : "pickupRequests"
-            const serviceLabel = WEEKLY_PLAN_LABELS[session.data.serviceType] || session.data.serviceType
+            const serviceLabel = PICKUP_SERVICE_LABELS[session.data.serviceType]
+              || WEEKLY_PLAN_LABELS[session.data.serviceType]
+              || session.data.serviceType
             await db.collection(col).add({
               customerName: session.data.name,
               customerPhone: from,
               address: session.data.address,
               wasteType: session.data.wasteType,
               pickupDate: session.data.pickupDate,
+              timeWindow: session.data.timeWindow ?? null,
               paymentReceiptUrl: receiptUrl,
               serviceType: session.data.serviceType,
               serviceLabel,
@@ -692,23 +747,31 @@ nextApp.prepare().then(() => {
             })
             await send("Confirming Transaction, you will get a notification shortly to confirm your transaction and booking.")
             await send(
-              `Booked! Summary:\n\nService: ${serviceLabel}\nAddress: ${session.data.address}\nWaste: ${session.data.wasteType}\nDate: ${session.data.pickupDate}\nPayment received\n\nWe will notify you once a collector is assigned.`
+              `Booked! Summary:\n\nService: ${serviceLabel}\nAddress: ${session.data.address}\nWaste: ${session.data.wasteType}\nDate: ${session.data.pickupDate}` +
+              (session.data.timeWindow ? `\nTime: ${session.data.timeWindow}` : "") +
+              `\nPayment received\n\nWe will notify you once a collector is assigned.`
             )
           }
           session.step = "done"
           break
 
-        // ── UPGRADE PLAN FLOW ──────────────────────────────────────────────
+        // ── MONTHLY SUBSCRIPTION FLOW ──────────────────────────────────────
         case "upgrade_choose":
-          await send(`Available Upgrade Plans\n\n1 - Basic  NGN 12,000/mo\n   Weekly pickup, up to 5 bags\n\n2 - Standard  NGN 20,000/mo\n   3x/week, up to 15 bags, priority support\n\n3 - Premium  NGN 35,000/mo\n   Daily pickup, unlimited bags, dedicated driver, free bags monthly\n\nReply 1, 2, or 3.`)
+          await send(SUBSCRIPTION_CATEGORY_MENU)
+          session.step = "plan_category"
+          break
+
+        case "plan_category":
+          if      (msg === "1") session.data.planCategory = "business"
+          else if (msg === "2") session.data.planCategory = "household"
+          else { await send("Please reply 1 for Business or 2 for Household."); break }
+          await send(monthlyPlansMenu(session.data.planCategory))
           session.step = "upgrade_select"
           break
 
         case "upgrade_select":
-          if      (msg === "1") session.data.upgradePlan = "basic"
-          else if (msg === "2") session.data.upgradePlan = "standard"
-          else if (msg === "3") session.data.upgradePlan = "premium"
-          else { await send("Please reply 1, 2, or 3."); break }
+          if (!["1", "2", "3"].includes(msg)) { await send("Please reply 1, 2, or 3."); break }
+          session.data.upgradePlan = `${session.data.planCategory || "business"}_${msg}`
           session.data.serviceType = `upgrade_${session.data.upgradePlan}`
           await send("Your pickup address for this plan?")
           session.step = "upgrade_address"
@@ -729,7 +792,7 @@ nextApp.prepare().then(() => {
           {
             const amount = SERVICE_PRICES[session.data.serviceType]
             await send(
-              `${session.data.upgradePlan.toUpperCase()} Plan\n\nAmount: NGN ${amount.toLocaleString()}/month\n\nPay to:\nBank: Moniepoint\nAccount Name: WasteCore Limited\nAccount Number: 6614999315\n\nUpload your payment receipt to confirm.`
+              `${monthlyPlanLabel(session.data.upgradePlan)}\n\nAmount: NGN ${amount.toLocaleString()}/month\n\nPay to:\nBank: Moniepoint\nAccount Name: WasteCore Limited\nAccount Number: 6614999315\n\nUpload your payment receipt to confirm.`
             )
           }
           session.step = "upgrade_payment"
@@ -744,6 +807,8 @@ nextApp.prepare().then(() => {
               customerPhone: from,
               address: session.data.address,
               plan: session.data.upgradePlan,
+              planCategory: session.data.planCategory ?? null,
+              planLabel: monthlyPlanLabel(session.data.upgradePlan),
               serviceType: session.data.serviceType,
               startDate: session.data.startDate,
               paymentReceiptUrl: receiptUrl,
@@ -752,7 +817,7 @@ nextApp.prepare().then(() => {
               updatedAt: new Date().toISOString(),
             })
             await send(
-              `Upgrade request received!\n\nPlan: ${session.data.upgradePlan.toUpperCase()}\nAddress: ${session.data.address}\nStart Date: ${session.data.startDate}\nPayment received\n\nOur team will activate your plan within 24 hours.`
+              `Monthly subscription request received!\n\nPlan: ${monthlyPlanLabel(session.data.upgradePlan)}\nAddress: ${session.data.address}\nStart Date: ${session.data.startDate}\nPayment received\n\nOur team will activate your plan within 24 hours.`
             )
           }
           session.step = "done"
