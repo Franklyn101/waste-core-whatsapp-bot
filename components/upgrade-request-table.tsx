@@ -20,16 +20,17 @@ import { AdvancedFilters, type FilterOptions } from "@/components/advanced-filte
 import { useFilteredRequests } from "@/hooks/use-filtered-data"
 import { FirebaseService } from "@/lib/firebase-service"
 import type { UpgradeRequest } from "@/lib/types"
+import { findPlan, planFullLabel } from "@/lib/subscriptions"
 
 interface UpgradeRequestsTableProps {
   searchQuery?: string
 }
 
-const PLAN_PRICES: Record<string, number> = {
-  starter: 5000,
-  standard: 10000,
-  premium: 15000,
-  basic: 12000, // retired plan
+// Plan label and price come from the shared plan list.
+function planInfo(planId: string): { label: string; price?: number } {
+  const plan = findPlan(planId)
+  if (plan) return { label: planFullLabel(plan), price: plan.price }
+  return { label: planId ? planId.charAt(0).toUpperCase() + planId.slice(1) : "—" }
 }
 
 // Missing/invalid dates fall back to epoch so they sort last.
@@ -146,11 +147,10 @@ export function UpgradeRequestsTable({ searchQuery = "" }: UpgradeRequestsTableP
     cancelled: "bg-red-100 text-red-800",
   }[status] ?? "bg-yellow-100 text-yellow-800")
 
-  const getPlanBadge = (plan: string) => ({
-    basic:    "bg-slate-100 text-slate-700",
-    standard: "bg-blue-100 text-blue-800",
-    premium:  "bg-amber-100 text-amber-800",
-  }[plan] ?? "bg-gray-100 text-gray-800")
+  const getPlanBadge = (plan: string) =>
+    plan.startsWith("household") ? "bg-emerald-100 text-emerald-800"
+    : plan.startsWith("business") ? "bg-blue-100 text-blue-800"
+    : "bg-gray-100 text-gray-800"
 
   const handleStatusUpdate = async (id: string, status: string) => {
     try {
@@ -251,12 +251,12 @@ export function UpgradeRequestsTable({ searchQuery = "" }: UpgradeRequestsTableP
                   </TableCell>
                   <TableCell>
                     <Badge className={getPlanBadge(request.plan)}>
-                      {request.plan.charAt(0).toUpperCase() + request.plan.slice(1)}
+                      {planInfo(request.plan).label}
                     </Badge>
                   </TableCell>
                   <TableCell>
                     <span className="text-sm font-medium">
-                      NGN {PLAN_PRICES[request.plan]?.toLocaleString() ?? "—"}/mo
+                      NGN {planInfo(request.plan).price?.toLocaleString() ?? "—"}/mo
                     </span>
                   </TableCell>
                   <TableCell>

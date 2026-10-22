@@ -88,9 +88,9 @@ function DashboardPage() {
         return (
           <div className="space-y-6">
             <div>
-              <h1 className="text-2xl md:text-3xl font-bold text-balance">Pickup Requests</h1>
+              <h1 className="text-2xl md:text-3xl font-bold text-balance">Scheduled Pickups</h1>
               <p className="text-muted-foreground mt-2">
-                Manage and track all waste collection requests from WhatsApp.
+                One-off pickups customers booked for a chosen date and time on WhatsApp.
               </p>
             </div>
             <PickupRequestsTable searchQuery={searchQuery} />
@@ -161,9 +161,9 @@ function DashboardPage() {
       return (
         <div className="space-y-6">
       <div>
-        <h1 className="text-2xl md:text-3xl font-bold text-balance">Business Plans</h1>
+        <h1 className="text-2xl md:text-3xl font-bold text-balance">Plan Requests</h1>
         <p className="text-muted-foreground mt-2">
-          Manage and track all business plan requests from WhatsApp.
+          New monthly subscription requests (Business and Household) from WhatsApp.
         </p>
       </div>
       <UpgradeRequestsTable searchQuery={searchQuery} />
