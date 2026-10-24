@@ -1,6 +1,14 @@
 // Subscription plans, matching the prices the WhatsApp bot quotes.
+// Monthly plans come in two categories, Business and Household; the old
+// weekly plans are retired but kept so existing records still display.
 
-export type SubscriptionKind = "weekly" | "monthly"
+export type SubscriptionKind = "business" | "household" | "weekly"
+
+export const SUBSCRIPTION_KINDS: { id: SubscriptionKind; label: string }[] = [
+  { id: "business", label: "Business" },
+  { id: "household", label: "Household" },
+  { id: "weekly", label: "Weekly (old)" },
+]
 
 export interface SubscriptionPlan {
   id: string
@@ -10,16 +18,40 @@ export interface SubscriptionPlan {
   priceUnit: "week" | "month"
   // Pickups per week; the schedule must pick exactly this many days.
   pickupsPerWeek: number
+  // Retired plan: still shown on old records, not offered for new ones.
+  legacy?: boolean
 }
 
+const monthly = (kind: "business" | "household", n: number, price: number): SubscriptionPlan => ({
+  id: `${kind}_${n}`,
+  kind,
+  label: `${n} pickup${n > 1 ? "s" : ""}/week`,
+  price,
+  priceUnit: "month",
+  pickupsPerWeek: n,
+})
+
 export const SUBSCRIPTION_PLANS: SubscriptionPlan[] = [
-  { id: "weekly_1", kind: "weekly", label: "1 pickup/week", price: 1250, priceUnit: "week", pickupsPerWeek: 1 },
-  { id: "weekly_2", kind: "weekly", label: "2 pickups/week", price: 2500, priceUnit: "week", pickupsPerWeek: 2 },
-  { id: "weekly_3", kind: "weekly", label: "3 pickups/week", price: 3750, priceUnit: "week", pickupsPerWeek: 3 },
-  { id: "basic", kind: "monthly", label: "Basic", price: 12000, priceUnit: "month", pickupsPerWeek: 1 },
-  { id: "standard", kind: "monthly", label: "Standard", price: 20000, priceUnit: "month", pickupsPerWeek: 3 },
-  { id: "premium", kind: "monthly", label: "Premium", price: 35000, priceUnit: "month", pickupsPerWeek: 7 },
+  monthly("business", 1, 5000),
+  monthly("business", 2, 10000),
+  monthly("business", 3, 15000),
+  monthly("household", 1, 3000),
+  monthly("household", 2, 6000),
+  monthly("household", 3, 9000),
+  // Retired plans
+  { id: "weekly_1", kind: "weekly", label: "1 pickup/week", price: 1250, priceUnit: "week", pickupsPerWeek: 1, legacy: true },
+  { id: "weekly_2", kind: "weekly", label: "2 pickups/week", price: 2500, priceUnit: "week", pickupsPerWeek: 2, legacy: true },
+  { id: "weekly_3", kind: "weekly", label: "3 pickups/week", price: 3750, priceUnit: "week", pickupsPerWeek: 3, legacy: true },
+  { id: "basic", kind: "business", label: "Basic (old plan)", price: 12000, priceUnit: "month", pickupsPerWeek: 1, legacy: true },
+  { id: "standard", kind: "business", label: "Standard (old plan)", price: 20000, priceUnit: "month", pickupsPerWeek: 3, legacy: true },
+  { id: "premium", kind: "business", label: "Premium (old plan)", price: 35000, priceUnit: "month", pickupsPerWeek: 7, legacy: true },
 ]
+
+// One-off pickups (not subscriptions).
+export const PICKUP_PRICES: Record<string, number> = {
+  instant: 3000,
+  scheduled: 3000,
+}
 
 export function findPlan(id: string | undefined): SubscriptionPlan | undefined {
   if (!id) return undefined
@@ -28,6 +60,19 @@ export function findPlan(id: string | undefined): SubscriptionPlan | undefined {
 
 export function planPriceLabel(plan: SubscriptionPlan): string {
   return `NGN ${plan.price.toLocaleString()}/${plan.priceUnit}`
+}
+
+// "Business · 2 pickups/week"
+export function planFullLabel(plan: SubscriptionPlan): string {
+  const kind = SUBSCRIPTION_KINDS.find((k) => k.id === plan.kind)
+  return plan.kind === "weekly" ? `Weekly · ${plan.label}` : `${kind?.label} · ${plan.label}`
+}
+
+// Price for any stored serviceType: one-off pickups, monthly plans
+// ("upgrade_business_2") or retired weekly plans ("weekly_1").
+export function servicePrice(serviceType: string | undefined): number | undefined {
+  if (!serviceType) return undefined
+  return PICKUP_PRICES[serviceType] ?? findPlan(serviceType)?.price
 }
 
 // Monday-first, matching how pickups are usually planned.

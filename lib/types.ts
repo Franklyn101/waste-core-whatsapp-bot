@@ -85,7 +85,7 @@ export interface SubscriptionRow extends SubscriberInput {
   id: string
   source: "admin" | "whatsapp"
   collection: "subscribers" | "pickupRequests" | "upgradeRequests"
-  kind: "weekly" | "monthly"
+  kind: "business" | "household" | "weekly"
   // Raw status from the WhatsApp booking (pending, assigned, ...).
   requestStatus?: string
   createdAt: Date

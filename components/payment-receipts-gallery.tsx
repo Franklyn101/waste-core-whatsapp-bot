@@ -10,6 +10,7 @@ import {
 import { Eye, Download, User, Calendar, Package } from "lucide-react"
 import { AdvancedFilters, type FilterOptions } from "@/components/advanced-filters"
 import { useFilteredRequests } from "@/hooks/use-filtered-data"
+import { servicePrice } from "@/lib/subscriptions"
 import { collection, getDocs } from "firebase/firestore"
 import { db } from "@/lib/firebase"
 
@@ -29,12 +30,9 @@ interface ReceiptRecord {
   wasteType: string      // used by filter slot
 }
 
-const SERVICE_PRICES: Record<string, number> = {
-  instant:          2000,
-  monthly:          10000,
-  upgrade_basic:    12000,
-  upgrade_standard: 20000,
-  upgrade_premium:  35000,
+// Fixed prices not covered by the shared plan list.
+const OTHER_PRICES: Record<string, number> = {
+  monthly:          10000, // legacy records
   wasteBags_small:  500,
   wasteBags_medium: 900,
   wasteBags_large:  1500,
@@ -50,8 +48,9 @@ function parseDate(value: any): Date {
 
 function serviceLabel(serviceType: string): string {
   if (serviceType === "instant")  return "Instant Pickup"
+  if (serviceType === "scheduled") return "Scheduled Pickup"
   if (serviceType === "monthly")  return "Monthly Subscription"
-  if (serviceType?.startsWith("upgrade_")) return "Plan Upgrade"
+  if (serviceType?.startsWith("upgrade_")) return "Monthly Subscription"
   if (serviceType === "wasteBags") return "Waste Bag Order"
   if (serviceType === "support")  return "Support"
   return serviceType ?? "Unknown"
@@ -60,8 +59,9 @@ function serviceLabel(serviceType: string): string {
 function getAmount(doc: any): number {
   if (doc.totalAmount) return doc.totalAmount
   const key = doc.serviceType ?? ""
-  if (SERVICE_PRICES[key]) return SERVICE_PRICES[key]
-  if (doc.bagSize) return SERVICE_PRICES[`wasteBags_${doc.bagSize}`] ?? 0
+  const price = servicePrice(key) ?? OTHER_PRICES[key]
+  if (price) return price
+  if (doc.bagSize) return OTHER_PRICES[`wasteBags_${doc.bagSize}`] ?? 0
   return 0
 }
 

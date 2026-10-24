@@ -35,6 +35,7 @@ import type { WasteRequest } from "@/lib/types"
 // Maps serviceType stored in Firestore to a human-readable label
 const SERVICE_LABELS: Record<string, string> = {
   instant:   "Instant Pickup",
+  scheduled: "Scheduled Pickup",
   weekly_1:  "1 pickup/week",
   weekly_2:  "2 pickups/week",
   weekly_3:  "3 pickups/week",
@@ -108,6 +109,7 @@ export function PickupRequestsTable({ searchQuery = "" }: PickupRequestsTablePro
 
   const getServiceBadge = (serviceType: string) => {
     if (serviceType === "instant") return "bg-blue-500/20 text-blue-600"
+    if (serviceType === "scheduled") return "bg-emerald-500/20 text-emerald-700"
     if (serviceType?.startsWith("weekly")) return "bg-purple-500/20 text-purple-600"
     return "bg-muted text-muted-foreground"
   }
@@ -216,7 +218,12 @@ export function PickupRequestsTable({ searchQuery = "" }: PickupRequestsTablePro
                   <TableCell>
                     <div className="flex items-center gap-2">
                       <Calendar className="w-4 h-4 text-muted-foreground" />
-                      <span className="text-sm">{request.pickupDate}</span>
+                      <div>
+                        <span className="text-sm">{request.pickupDate}</span>
+                        {(request as any).timeWindow && (
+                          <div className="text-xs text-muted-foreground">{(request as any).timeWindow}</div>
+                        )}
+                      </div>
                     </div>
                   </TableCell>
                   <TableCell>
