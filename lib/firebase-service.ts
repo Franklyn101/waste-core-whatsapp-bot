@@ -64,6 +64,8 @@ function normalizeRequest(data: any, id: string): WasteRequest {
     status:            data.status ?? "pending",
     serviceType:       data.serviceType ?? "instant",
     timeWindow:        data.timeWindow ?? "",
+    bagCount:          data.bagCount ?? null,
+    totalAmount:       data.totalAmount ?? null,
     createdAt,
     updatedAt,
   }
@@ -147,6 +149,7 @@ function normalizeCollectorPickup(data: any, id: string, col: PickupCollection):
     customerPhone: (data.customerPhone ?? "").replace(/^whatsapp:/i, ""),
     address:       data.address ?? "",
     wasteType:     data.wasteType ?? "",
+    bagCount:      data.bagCount ?? null,
     pickupDate:    data.pickupDate ?? "",
     serviceType:   data.serviceLabel ?? data.serviceType ?? "",
     status:        data.status ?? "pending",

@@ -102,7 +102,9 @@ function collectorMessage(pickup: CollectorPickup, collector: Collector): string
     `Phone: ${pickup.customerPhone || "N/A"}`,
     `Address: ${pickup.address || "N/A"}`,
     ...(pickup.address ? [`Map: ${mapLink}`] : []),
-    `Waste: ${pickup.wasteType || "N/A"}`,
+    pickup.bagCount
+      ? `Bags: ${pickup.bagCount}`
+      : `Waste: ${pickup.wasteType || "N/A"}`,
     `Service: ${pickup.serviceType || "N/A"}`,
   ].join("\n")
 }

@@ -54,6 +54,7 @@ export interface CollectorPickup {
   customerPhone: string
   address: string
   wasteType: string
+  bagCount: number | null
   pickupDate: string
   serviceType: string
   status: string

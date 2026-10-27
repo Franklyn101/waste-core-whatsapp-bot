@@ -47,8 +47,15 @@ export const SUBSCRIPTION_PLANS: SubscriptionPlan[] = [
   { id: "premium", kind: "business", label: "Premium (old plan)", price: 35000, priceUnit: "month", pickupsPerWeek: 7, legacy: true },
 ]
 
-// One-off pickups (not subscriptions).
-export const PICKUP_PRICES: Record<string, number> = {
+// One-off pickups are charged per bag (matches the WhatsApp bot); each
+// booking stores its own totalAmount.
+export const PICKUP_PRICE_PER_BAG: Record<string, number> = {
+  instant: 1000,
+  scheduled: 650,
+}
+
+// Flat price for one-off pickups booked before per-bag pricing.
+const LEGACY_PICKUP_PRICES: Record<string, number> = {
   instant: 3000,
   scheduled: 3000,
 }
@@ -72,7 +79,7 @@ export function planFullLabel(plan: SubscriptionPlan): string {
 // ("upgrade_business_2") or retired weekly plans ("weekly_1").
 export function servicePrice(serviceType: string | undefined): number | undefined {
   if (!serviceType) return undefined
-  return PICKUP_PRICES[serviceType] ?? findPlan(serviceType)?.price
+  return LEGACY_PICKUP_PRICES[serviceType] ?? findPlan(serviceType)?.price
 }
 
 // Monday-first, matching how pickups are usually planned.
