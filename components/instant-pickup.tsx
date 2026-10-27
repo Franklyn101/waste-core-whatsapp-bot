@@ -169,7 +169,7 @@ export function InstantPickupTable({ searchQuery = "" }: InstantPickupTableProps
                 <TableHead>Customer</TableHead>
                 <TableHead>Contact</TableHead>
                 <TableHead>Address</TableHead>
-                <TableHead>Waste Type</TableHead>
+                <TableHead>Bags</TableHead>
                 <TableHead>Pickup Date</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>Receipt</TableHead>
@@ -193,7 +193,20 @@ export function InstantPickupTable({ searchQuery = "" }: InstantPickupTableProps
                     </div>
                   </TableCell>
                   <TableCell>
-                    <Badge variant="outline">{request.wasteType}</Badge>
+                    {(request as any).bagCount ? (
+                      <div>
+                        <div className="text-sm font-medium">
+                          {(request as any).bagCount} bag{(request as any).bagCount > 1 ? "s" : ""}
+                        </div>
+                        <div className="text-xs text-muted-foreground">
+                          NGN {Number((request as any).totalAmount ?? 0).toLocaleString()}
+                        </div>
+                      </div>
+                    ) : request.wasteType ? (
+                      <Badge variant="outline">{request.wasteType}</Badge>
+                    ) : (
+                      <span className="text-sm text-muted-foreground">—</span>
+                    )}
                   </TableCell>
                   <TableCell>
                     <div className="flex items-center gap-2">

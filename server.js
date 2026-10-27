@@ -93,8 +93,6 @@ try {
 
 // ================= PRICING MAP =================
 const SERVICE_PRICES = {
-  instant: 3000,
-  scheduled: 3000,
   // Monthly subscriptions
   upgrade_business_1: 5000,
   upgrade_business_2: 10000,
@@ -115,10 +113,17 @@ const SERVICE_PRICES = {
   support: 0,
 }
 
+// One-off pickups are charged per bag of waste.
+const PICKUP_PRICE_PER_BAG = {
+  instant: 1000,
+  scheduled: 650,
+}
+const MAX_BAGS_PER_PICKUP = 50
+
 const SERVICE_MENU =
   `Choose service:\n` +
-  `1 - Instant Pickup (NGN 3,000)\n` +
-  `2 - Schedule a Pickup (NGN 3,000)\n` +
+  `1 - Instant Pickup\n` +
+  `2 - Schedule a Pickup\n` +
   `3 - Monthly Subscription\n` +
   `4 - Order Waste Bags\n` +
   `5 - Speak to Support`
@@ -314,7 +319,7 @@ function setupStatusListeners() {
               )
               await db.collection("invoices").add({
                 customerPhone: data.customerPhone,
-                amount: SERVICE_PRICES[data.serviceType] ?? 0,
+                amount: data.totalAmount ?? SERVICE_PRICES[data.serviceType] ?? 0,
                 status: "paid",
                 relatedPickupId: change.doc.id,
                 createdAt: new Date().toISOString(),
@@ -569,8 +574,36 @@ nextApp.prepare().then(() => {
       }
     }
 
-    const sendPickupPayment = () => send(
-      `Thank you ${session.data.name}!\n\nPlease make payment to:\nBank: Moniepoint\nAccount Name: WasteCore Limited\nAccount Number: 6614999315\n\nAmount: NGN ${SERVICE_PRICES[session.data.serviceType].toLocaleString()}\n\nAfter payment, upload your payment receipt image.`
+    // Per-bag pickups show the calculation; retired flat-price plans
+    // (old weekly sessions) still use their fixed price.
+    const sendPickupPayment = () => {
+      const { bagCount, pricePerBag, totalAmount } = session.data
+      const amountText = bagCount
+        ? `${bagCount} bag${bagCount > 1 ? "s" : ""} x NGN ${pricePerBag.toLocaleString()} = NGN ${totalAmount.toLocaleString()}`
+        : `NGN ${SERVICE_PRICES[session.data.serviceType].toLocaleString()}`
+      return send(
+        `Thank you ${session.data.name}!\n\nPlease make payment to:\nBank: Moniepoint\nAccount Name: WasteCore Limited\nAccount Number: 6614999315\n\nAmount: ${amountText}\n\nAfter payment, upload your payment receipt image.`
+      )
+    }
+
+    // Per-bag pickups ask for the bag count first; retired flat-price
+    // plans go straight to the date.
+    const askBagsOrDate = async () => {
+      const perBag = PICKUP_PRICE_PER_BAG[session.data.serviceType]
+      if (perBag) {
+        // The per-bag price is only shown once, in the calculation.
+        await send("How many bags of waste do you want to dispose?\n\nReply with a number, e.g. 3.")
+        session.step = "pickup_bags"
+      } else {
+        await askPickupDate()
+        session.step = "pickup_date"
+      }
+    }
+
+    const askPickupDate = () => send(
+      session.data.serviceType === "scheduled"
+        ? "Which date should we come? (YYYY-MM-DD, e.g. 2026-03-30)"
+        : "Pickup date (YYYY-MM-DD)?"
     )
 
     try {
@@ -681,19 +714,34 @@ nextApp.prepare().then(() => {
         // ── INSTANT & SCHEDULED PICKUP FLOW ────────────────────────────────
         case "pickup_address":
           session.data.address = msg.substring(0, 300)
-          await send("Waste type?\n\n1 - Organic\n2 - Plastic\n3 - Paper\n4 - Fabric\n\nOr type the name of your waste.")
-          session.step = "pickup_waste"
+          await askBagsOrDate()
           break
 
+        // Waste type is no longer asked; kept for conversations already at this step.
         case "pickup_waste":
           session.data.wasteType = msg.substring(0, 100)
-          await send(
-            session.data.serviceType === "scheduled"
-              ? "Which date should we come? (YYYY-MM-DD, e.g. 2026-03-30)"
-              : "Pickup date (YYYY-MM-DD)?"
-          )
+          await askBagsOrDate()
+          break
+
+        case "pickup_bags": {
+          const bags = Number(msg)
+          if (!/^\d+$/.test(msg) || bags < 1) {
+            await send("Please reply with the number of bags, e.g. 3.")
+            break
+          }
+          if (bags > MAX_BAGS_PER_PICKUP) {
+            await send(`For more than ${MAX_BAGS_PER_PICKUP} bags, please choose a Monthly Subscription or type cancel and speak to support.`)
+            break
+          }
+          const perBag = PICKUP_PRICE_PER_BAG[session.data.serviceType]
+          session.data.bagCount = bags
+          session.data.pricePerBag = perBag
+          session.data.totalAmount = bags * perBag
+          await send(`${bags} bag${bags > 1 ? "s" : ""} x NGN ${perBag.toLocaleString()} = NGN ${session.data.totalAmount.toLocaleString()}`)
+          await askPickupDate()
           session.step = "pickup_date"
           break
+        }
 
         case "pickup_date":
           if (!/^\d{4}-\d{2}-\d{2}$/.test(msg) || isNaN(Date.parse(msg))) {
@@ -735,9 +783,12 @@ nextApp.prepare().then(() => {
               customerName: session.data.name,
               customerPhone: from,
               address: session.data.address,
-              wasteType: session.data.wasteType,
+              wasteType: session.data.wasteType ?? null,
               pickupDate: session.data.pickupDate,
               timeWindow: session.data.timeWindow ?? null,
+              bagCount: session.data.bagCount ?? null,
+              pricePerBag: session.data.pricePerBag ?? null,
+              totalAmount: session.data.totalAmount ?? SERVICE_PRICES[session.data.serviceType] ?? null,
               paymentReceiptUrl: receiptUrl,
               serviceType: session.data.serviceType,
               serviceLabel,
@@ -747,7 +798,9 @@ nextApp.prepare().then(() => {
             })
             await send("Confirming Transaction, you will get a notification shortly to confirm your transaction and booking.")
             await send(
-              `Booked! Summary:\n\nService: ${serviceLabel}\nAddress: ${session.data.address}\nWaste: ${session.data.wasteType}\nDate: ${session.data.pickupDate}` +
+              `Booked! Summary:\n\nService: ${serviceLabel}\nAddress: ${session.data.address}` +
+              (session.data.bagCount ? `\nBags: ${session.data.bagCount} (NGN ${session.data.totalAmount.toLocaleString()})` : "") +
+              `\nDate: ${session.data.pickupDate}` +
               (session.data.timeWindow ? `\nTime: ${session.data.timeWindow}` : "") +
               `\nPayment received\n\nWe will notify you once a collector is assigned.`
             )
