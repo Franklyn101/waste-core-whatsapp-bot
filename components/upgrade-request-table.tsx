@@ -4,6 +4,7 @@ import { useState, useEffect } from "react"
 import { collection, onSnapshot, getDocs } from "firebase/firestore"
 import { db } from "@/lib/firebase"
 import { Badge } from "@/components/ui/badge"
+import { PaystackPaidBadge } from "@/components/paystack-paid-badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import {
@@ -108,6 +109,8 @@ export function UpgradeRequestsTable({ searchQuery = "" }: UpgradeRequestsTableP
             serviceType:       data.serviceType ?? "",
             startDate:         data.startDate ?? "",
             paymentReceiptUrl: data.paymentReceiptUrl ?? "",
+            paymentMethod:     data.paymentMethod ?? "",
+            paymentReference:  data.paymentReference ?? "",
             status:            data.status ?? "pending",
             createdAt:         toDate(data.createdAt),
             updatedAt:         toDate(data.updatedAt || data.createdAt),
@@ -279,7 +282,11 @@ export function UpgradeRequestsTable({ searchQuery = "" }: UpgradeRequestsTableP
                         <Eye className="w-4 h-4" /> View
                       </Button>
                     ) : (
-                      <span className="text-sm text-gray-400">No receipt</span>
+                      ((request as any).paymentMethod === "paystack" ? (
+                        <PaystackPaidBadge reference={(request as any).paymentReference} />
+                      ) : (
+                        <span className="text-sm text-gray-400">No receipt</span>
+                      ))
                     )}
                   </TableCell>
                   <TableCell>

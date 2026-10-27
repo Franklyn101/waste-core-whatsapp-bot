@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react"
 import { Badge } from "@/components/ui/badge"
+import { PaystackPaidBadge } from "@/components/paystack-paid-badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import {
@@ -234,7 +235,11 @@ export function WasteBagOrdersTable({ searchQuery = "" }: WasteBagOrdersTablePro
                         <Eye className="w-4 h-4" /> View
                       </Button>
                     ) : (
-                      <span className="text-sm text-gray-400">No receipt</span>
+                      ((order as any).paymentMethod === "paystack" ? (
+                        <PaystackPaidBadge reference={(order as any).paymentReference} />
+                      ) : (
+                        <span className="text-sm text-gray-400">No receipt</span>
+                      ))
                     )}
                   </TableCell>
 
