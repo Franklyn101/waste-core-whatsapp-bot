@@ -344,6 +344,43 @@ function setupStatusListeners() {
 }
 
 // ================= HELPERS =================
+// ================= WHATSAPP BUTTON MESSAGES =================
+/**
+ * Sends a message with a tappable URL button (WhatsApp "cta_url"
+ * interactive message) straight through Meta's Cloud API, using the same
+ * WHATSAPP_ACCESS_TOKEN the bot uses to download receipt photos.
+ * Returns false if it can't be sent (no token/number ID, or Meta rejects
+ * it) so the caller can fall back to a plain text message with the link.
+ */
+async function sendWhatsAppUrlButton(to, { body, buttonText, url, footer, phoneNumberId }) {
+  const numberId = process.env.WHATSAPP_PHONE_NUMBER_ID || phoneNumberId
+  const token = process.env.WHATSAPP_ACCESS_TOKEN
+  const phone = normalizePhone(to).replace(/\D/g, "")
+  if (!numberId || !token || !phone) return false
+  try {
+    const res = await axios.post(
+      `https://graph.facebook.com/v19.0/${numberId}/messages`,
+      {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to: phone,
+        type: "interactive",
+        interactive: {
+          type: "cta_url",
+          body: { text: body.slice(0, 1024) },
+          ...(footer ? { footer: { text: footer.slice(0, 60) } } : {}),
+          action: { name: "cta_url", parameters: { display_text: buttonText.slice(0, 20), url } },
+        },
+      },
+      { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, timeout: 15000 }
+    )
+    return Boolean(res.data?.messages?.[0]?.id)
+  } catch (err) {
+    console.error("WhatsApp button message failed, sending link as text:", err.response?.data || err.message)
+    return false
+  }
+}
+
 // ================= CHECKOUT =================
 const BANK_DETAILS =
   `Bank: Moniepoint\nAccount Name: WasteCore Limited\nAccount Number: 6614999315`
@@ -655,7 +692,8 @@ nextApp.prepare().then(() => {
       const messageId = message.id || null
       // `msg` is lowercased for matching commands and menu choices; `rawMsg`
       // keeps what the customer typed for names, addresses and descriptions.
-      return { from: normalizedFrom, msg: text.toLowerCase().substring(0, 500), rawMsg: text, hasImage, mediaId, messageId }
+      const phoneNumberId = value?.metadata?.phone_number_id || null
+      return { from: normalizedFrom, msg: text.toLowerCase().substring(0, 500), rawMsg: text, hasImage, mediaId, messageId, phoneNumberId }
     } catch (e) {
       console.error("extractIncoming error:", e)
       return { from: "", msg: "", hasImage: false, mediaId: null, messageId: null }
@@ -748,7 +786,7 @@ nextApp.prepare().then(() => {
     // Acknowledge immediately — Flaxxa expects a fast 200 OK
     res.sendStatus(200)
 
-    const { from, msg, rawMsg = "", hasImage, mediaId, messageId } = extractIncoming(req)
+    const { from, msg, rawMsg = "", hasImage, mediaId, messageId, phoneNumberId } = extractIncoming(req)
     if (!from) {
       console.warn("Webhook received with no sender phone — ignored.", req.body)
       return
@@ -808,6 +846,21 @@ nextApp.prepare().then(() => {
       if (paystackEnabled()) {
         const link = await createPaystackPayment(checkout, from)
         if (link) {
+          const payLabel = `Pay ${naira(checkout.amount)}`
+          const sentButton = await sendWhatsAppUrlButton(from, {
+            body:
+              `Thanks, ${displayName(session.data.name)}! Here's your order:\n\n${orderSummary(checkout)}\n\n` +
+              `Tap *${payLabel}* below to pay securely by card, bank transfer or USSD. ` +
+              `We'll confirm your booking right here as soon as your payment goes through.`,
+            buttonText: payLabel,
+            url: link,
+            footer: "\u{1F512} Secured by Paystack",
+            phoneNumberId,
+          })
+          if (sentButton) {
+            session.step = "done"
+            return
+          }
           await send(
             `Thanks, ${displayName(session.data.name)}! Here's your order:\n\n${orderSummary(checkout)}\n\n` +
             `\u{1F447} *Tap the link below to pay ${naira(checkout.amount)}*\n${link}\n\n` +
