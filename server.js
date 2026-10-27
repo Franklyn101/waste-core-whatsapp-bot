@@ -348,9 +348,27 @@ function setupStatusListeners() {
 const BANK_DETAILS =
   `Bank: Moniepoint\nAccount Name: WasteCore Limited\nAccount Number: 6614999315`
 
+// ---- Message formatting (WhatsApp supports *bold* and emoji) ----
+const naira = (n) => `\u20A6${Number(n).toLocaleString()}`
+
+// Names arrive lowercased from the parser; "franklyn ade" -> "Franklyn Ade".
+const displayName = (name) =>
+  String(name || "").replace(/\b\w/g, (c) => c.toUpperCase())
+
+// "2026-10-27" -> "27 Oct 2026"
+function displayDate(iso) {
+  const d = new Date(`${iso}T00:00:00`)
+  if (isNaN(d.getTime())) return iso
+  return d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })
+}
+
+const bagsText = (n) => `${n} bag${n > 1 ? "s" : ""}`
+const DIVIDER = "\u2501".repeat(14)
+
 // Everything needed to charge for and save the booking a conversation has
 // built up: where it is saved, the document, the amount, and the messages.
 // Used by both Paystack and the bank-transfer + receipt fallback.
+// `details` are the order lines shown before payment and in the confirmation.
 function buildCheckout(d, from) {
   if (String(d.serviceType).startsWith("upgrade_")) {
     const label = monthlyPlanLabel(d.upgradePlan)
@@ -359,56 +377,85 @@ function buildCheckout(d, from) {
       collection: "upgradeRequests",
       amount,
       description: `${label} (monthly)`,
-      amountLine: `${label}\nAmount: NGN ${amount.toLocaleString()}/month`,
+      title: `${label.replace(" - ", " plan \u00B7 ")}`,
+      details: [`\u{1F4CD} ${d.address}`, `\u{1F4C5} Starts ${displayDate(d.startDate)}`],
+      totalText: `${naira(amount)}/month`,
       doc: {
         customerName: d.name, customerPhone: from, address: d.address,
         plan: d.upgradePlan, planCategory: d.planCategory ?? null, planLabel: label,
         serviceType: d.serviceType, startDate: d.startDate, totalAmount: amount,
       },
-      confirmation:
-        `Monthly subscription request received!\n\nPlan: ${label}\nAddress: ${d.address}\nStart Date: ${d.startDate}\nPayment received\n\nOur team will activate your plan within 24 hours.`,
+      doneTitle: "Payment received. Your subscription is confirmed!",
+      nextSteps: "Our team will activate your plan within 24 hours.",
     }
   }
 
   if (d.serviceType === "wasteBags") {
+    const size = d.bagSize.charAt(0).toUpperCase() + d.bagSize.slice(1)
     return {
       collection: "wasteBagOrders",
       amount: d.bagTotal,
       description: `${d.bagSize} waste bags x ${d.bagQuantity} pack(s)`,
-      amountLine: `Size: ${d.bagSize.toUpperCase()}\nPacks: ${d.bagQuantity}\nAddress: ${d.address}\nTotal: NGN ${d.bagTotal.toLocaleString()}`,
+      title: "Waste bags",
+      details: [
+        `\u{1F6CD} ${size} bags \u00D7 ${d.bagQuantity} pack${d.bagQuantity > 1 ? "s" : ""}`,
+        `\u{1F4CD} Deliver to: ${d.address}`,
+      ],
+      totalText: naira(d.bagTotal),
       doc: {
         customerName: d.name, customerPhone: from, bagSize: d.bagSize, quantity: d.bagQuantity,
         totalAmount: d.bagTotal, deliveryAddress: d.address, serviceType: "wasteBags",
       },
-      confirmation:
-        `Order confirmed!\n\n${d.bagSize.toUpperCase()} bags x ${d.bagQuantity} pack(s)\nDelivery: ${d.address}\nTotal: NGN ${d.bagTotal.toLocaleString()}\nPayment received\n\nExpect delivery within 1-2 business days.`,
+      doneTitle: "Payment received. Your order is confirmed!",
+      nextSteps: "Expect delivery within 1-2 business days.",
     }
   }
 
   // Instant / scheduled pickup (and retired flat-price weekly sessions)
   const serviceLabel = PICKUP_SERVICE_LABELS[d.serviceType] || WEEKLY_PLAN_LABELS[d.serviceType] || d.serviceType
   const amount = d.totalAmount ?? SERVICE_PRICES[d.serviceType]
-  const amountText = d.bagCount
-    ? `${d.bagCount} bag${d.bagCount > 1 ? "s" : ""} x NGN ${d.pricePerBag.toLocaleString()} = NGN ${amount.toLocaleString()}`
-    : `NGN ${amount.toLocaleString()}`
+  const when = `\u{1F4C5} ${displayDate(d.pickupDate)}${d.timeWindow ? ` \u00B7 ${d.timeWindow}` : ""}`
   return {
     collection: d.serviceType === "instant" ? "instantPickups" : "pickupRequests",
     amount,
-    description: `${serviceLabel}${d.bagCount ? ` - ${d.bagCount} bag${d.bagCount > 1 ? "s" : ""}` : ""}`,
-    amountLine: `Amount: ${amountText}`,
+    description: `${serviceLabel}${d.bagCount ? ` - ${bagsText(d.bagCount)}` : ""}`,
+    title: serviceLabel,
+    details: [
+      ...(d.bagCount ? [`\u{1F6CD} ${bagsText(d.bagCount)} \u00D7 ${naira(d.pricePerBag)}`] : []),
+      `\u{1F4CD} ${d.address}`,
+      when,
+    ],
+    totalText: naira(amount),
     doc: {
       customerName: d.name, customerPhone: from, address: d.address,
       wasteType: d.wasteType ?? null, pickupDate: d.pickupDate, timeWindow: d.timeWindow ?? null,
       bagCount: d.bagCount ?? null, pricePerBag: d.pricePerBag ?? null, totalAmount: amount ?? null,
       serviceType: d.serviceType, serviceLabel,
     },
-    confirmation:
-      `Booked! Summary:\n\nService: ${serviceLabel}\nAddress: ${d.address}` +
-      (d.bagCount ? `\nBags: ${d.bagCount} (NGN ${amount.toLocaleString()})` : "") +
-      `\nDate: ${d.pickupDate}` +
-      (d.timeWindow ? `\nTime: ${d.timeWindow}` : "") +
-      `\nPayment received\n\nWe will notify you once a collector is assigned.`,
+    doneTitle: "Payment received. You're booked!",
+    nextSteps: "We'll message you when a collector is assigned.",
   }
+}
+
+// Order summary card shown before payment.
+function orderSummary(c) {
+  return [`\u{1F9FE} *${c.title}*`, ...c.details, DIVIDER, `\u{1F4B0} *Total: ${c.totalText}*`].join("\n")
+}
+
+// Message sent once the booking is saved. Paystack payments are verified;
+// a receipt photo is only received, so it isn't called "payment received".
+function confirmationMessage(c, { viaReceipt = false } = {}) {
+  const title = viaReceipt ? c.doneTitle.replace(/^Payment received\./, "Receipt received.") : c.doneTitle
+  return [
+    `\u2705 *${title}*`,
+    "",
+    `*${c.title}*`,
+    ...c.details,
+    viaReceipt ? `\u{1F4B0} Amount: ${c.totalText}` : `\u{1F4B0} Paid: ${c.totalText}`,
+    "",
+    c.nextSteps,
+    "Reply *hi* anytime to make another booking.",
+  ].join("\n")
 }
 
 // Saves a paid booking. Shared by the receipt flow and Paystack.
@@ -425,6 +472,8 @@ const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY
 const PAYSTACK_API = "https://api.paystack.co"
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "")
 const PAYSTACK_EMAIL_DOMAIN = process.env.PAYSTACK_CUSTOMER_EMAIL_DOMAIN || "customers.wastecore.ng"
+// Business WhatsApp number for the "Back to WhatsApp" button (digits only).
+const WHATSAPP_BUSINESS_NUMBER = (process.env.WHATSAPP_BUSINESS_NUMBER || "2348117501757").replace(/\D/g, "")
 
 const paystackEnabled = () => Boolean(PAYSTACK_SECRET_KEY)
 
@@ -443,7 +492,7 @@ async function createPaystackPayment(checkout, from) {
       collection: checkout.collection,
       doc: checkout.doc,
       amount: checkout.amount,
-      confirmation: checkout.confirmation,
+      confirmation: confirmationMessage(checkout),
       customerPhone: from,
       status: "pending",
       createdAt: new Date().toISOString(),
@@ -596,7 +645,7 @@ nextApp.prepare().then(() => {
           ? message.interactive?.button_reply?.title ||
             message.interactive?.list_reply?.title || ""
           : ""
-      ).toString().trim().toLowerCase().substring(0, 500)
+      ).toString().trim().substring(0, 1000)
 
       // Image — Meta sends media ID, not a URL.
       // We fetch the URL via the Graph API using the media ID.
@@ -604,7 +653,9 @@ nextApp.prepare().then(() => {
       const mediaId  = hasImage ? message.image?.id || null : null
 
       const messageId = message.id || null
-      return { from: normalizedFrom, msg: text, hasImage, mediaId, messageId }
+      // `msg` is lowercased for matching commands and menu choices; `rawMsg`
+      // keeps what the customer typed for names, addresses and descriptions.
+      return { from: normalizedFrom, msg: text.toLowerCase().substring(0, 500), rawMsg: text, hasImage, mediaId, messageId }
     } catch (e) {
       console.error("extractIncoming error:", e)
       return { from: "", msg: "", hasImage: false, mediaId: null, messageId: null }
@@ -697,7 +748,7 @@ nextApp.prepare().then(() => {
     // Acknowledge immediately — Flaxxa expects a fast 200 OK
     res.sendStatus(200)
 
-    const { from, msg, hasImage, mediaId, messageId } = extractIncoming(req)
+    const { from, msg, rawMsg = "", hasImage, mediaId, messageId } = extractIncoming(req)
     if (!from) {
       console.warn("Webhook received with no sender phone — ignored.", req.body)
       return
@@ -752,27 +803,31 @@ nextApp.prepare().then(() => {
 
     // Payment: a Paystack link when configured (booking is created once
     // Paystack confirms), otherwise bank transfer + receipt photo.
-    const startCheckout = async (receiptStep, bankMessage) => {
+    const startCheckout = async (receiptStep) => {
       const checkout = buildCheckout(session.data, from)
       if (paystackEnabled()) {
         const link = await createPaystackPayment(checkout, from)
         if (link) {
           await send(
-            `Thank you ${session.data.name}!\n\n${checkout.amountLine}\n\n` +
-            `Pay securely with Paystack (card, bank transfer or USSD):\n${link}\n\n` +
-            `Your booking is confirmed automatically once your payment goes through.`
+            `Thanks, ${displayName(session.data.name)}! Here's your order:\n\n${orderSummary(checkout)}\n\n` +
+            `\u{1F447} *Tap the link below to pay ${naira(checkout.amount)}*\n${link}\n\n` +
+            `\u{1F4B3} Card  \u00B7  \u{1F3E6} Bank transfer  \u00B7  \u{1F4F1} USSD\n` +
+            `\u{1F512} Secured by Paystack\n\n` +
+            `We'll confirm your booking right here as soon as your payment goes through.`
           )
           session.step = "done"
           return
         }
       }
-      await send(bankMessage(checkout))
+      await send(
+        `Thanks, ${displayName(session.data.name)}! Here's your order:\n\n${orderSummary(checkout)}\n\n` +
+        `\u{1F3E6} *Pay by bank transfer*\n${BANK_DETAILS}\n\n` +
+        `\u{1F4F8} After paying, send a photo of your payment receipt here.`
+      )
       session.step = receiptStep
     }
 
-    const sendPickupPayment = () => startCheckout("pickup_payment", (c) =>
-      `Thank you ${session.data.name}!\n\nPlease make payment to:\n${BANK_DETAILS}\n\n${c.amountLine}\n\nAfter payment, upload your payment receipt image.`
-    )
+    const sendPickupPayment = () => startCheckout("pickup_payment")
 
     // Per-bag pickups ask for the bag count first; retired flat-price
     // plans go straight to the date.
@@ -863,7 +918,7 @@ nextApp.prepare().then(() => {
 
         // ── NAME & SERVICE SELECTION ───────────────────────────────────────
         case "1":
-          session.data.name = msg.substring(0, 100)
+          session.data.name = rawMsg.substring(0, 100)
           if (!session.data.serviceType) {
             await send(SERVICE_MENU)
             session.step = "1.5"
@@ -901,13 +956,13 @@ nextApp.prepare().then(() => {
 
         // ── INSTANT & SCHEDULED PICKUP FLOW ────────────────────────────────
         case "pickup_address":
-          session.data.address = msg.substring(0, 300)
+          session.data.address = rawMsg.substring(0, 300)
           await askBagsOrDate()
           break
 
         // Waste type is no longer asked; kept for conversations already at this step.
         case "pickup_waste":
-          session.data.wasteType = msg.substring(0, 100)
+          session.data.wasteType = rawMsg.substring(0, 100)
           await askBagsOrDate()
           break
 
@@ -925,7 +980,7 @@ nextApp.prepare().then(() => {
           session.data.bagCount = bags
           session.data.pricePerBag = perBag
           session.data.totalAmount = bags * perBag
-          await send(`${bags} bag${bags > 1 ? "s" : ""} x NGN ${perBag.toLocaleString()} = NGN ${session.data.totalAmount.toLocaleString()}`)
+          await send(`\u{1F6CD} ${bagsText(bags)} \u00D7 ${naira(perBag)} = *${naira(session.data.totalAmount)}*`)
           await askPickupDate()
           session.step = "pickup_date"
           break
@@ -965,8 +1020,7 @@ nextApp.prepare().then(() => {
             await db.collection(checkout.collection).add(
               bookingRecord(checkout, { paymentReceiptUrl: receiptUrl, paymentMethod: "bank_transfer" })
             )
-            await send("Confirming Transaction, you will get a notification shortly to confirm your transaction and booking.")
-            await send(checkout.confirmation)
+            await send(confirmationMessage(checkout, { viaReceipt: true }))
           }
           session.step = "done"
           break
@@ -994,7 +1048,7 @@ nextApp.prepare().then(() => {
           break
 
         case "upgrade_address":
-          session.data.address = msg.substring(0, 300)
+          session.data.address = rawMsg.substring(0, 300)
           await send("Preferred start date (YYYY-MM-DD)?")
           session.step = "upgrade_date"
           break
@@ -1005,9 +1059,7 @@ nextApp.prepare().then(() => {
             break
           }
           session.data.startDate = msg
-          await startCheckout("upgrade_payment", (c) =>
-            `${c.amountLine}\n\nPay to:\n${BANK_DETAILS}\n\nUpload your payment receipt to confirm.`
-          )
+          await startCheckout("upgrade_payment")
           break
 
         case "upgrade_payment":
@@ -1018,7 +1070,7 @@ nextApp.prepare().then(() => {
             await db.collection(checkout.collection).add(
               bookingRecord(checkout, { paymentReceiptUrl: receiptUrl, paymentMethod: "bank_transfer" })
             )
-            await send(checkout.confirmation)
+            await send(confirmationMessage(checkout, { viaReceipt: true }))
           }
           session.step = "done"
           break
@@ -1053,10 +1105,8 @@ nextApp.prepare().then(() => {
           break
 
         case "bags_address":
-          session.data.address = msg.substring(0, 300)
-          await startCheckout("bags_payment", (c) =>
-            `Order Summary\n\n${c.amountLine}\n\nPay to:\n${BANK_DETAILS}\n\nUpload payment receipt to confirm.`
-          )
+          session.data.address = rawMsg.substring(0, 300)
+          await startCheckout("bags_payment")
           break
 
         case "bags_payment":
@@ -1067,7 +1117,7 @@ nextApp.prepare().then(() => {
             await db.collection(checkout.collection).add(
               bookingRecord(checkout, { paymentReceiptUrl: receiptUrl, paymentMethod: "bank_transfer" })
             )
-            await send(checkout.confirmation)
+            await send(confirmationMessage(checkout, { viaReceipt: true }))
           }
           session.step = "done"
           break
@@ -1095,13 +1145,13 @@ nextApp.prepare().then(() => {
           break
 
         case "support_describe":
-          session.data.supportMessage = msg.substring(0, 1000)
+          session.data.supportMessage = rawMsg.substring(0, 1000)
           await send("What is your preferred contact time? e.g. mornings, afternoons, or type anytime.")
           session.step = "support_contact_time"
           break
 
         case "support_contact_time":
-          session.data.contactTime = msg.substring(0, 100)
+          session.data.contactTime = rawMsg.substring(0, 100)
           {
             const ticketId = `TKT-${Date.now().toString().slice(-6)}`
             await db.collection("supportTickets").add({
@@ -1341,11 +1391,32 @@ nextApp.prepare().then(() => {
         console.error("Paystack verify failed:", err.response?.data || err.message)
       }
     }
-    res.type("html").send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>WasteCore payment</title>
-<style>body{font-family:system-ui,sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0;background:#f6f7f6;color:#1d2b22}main{max-width:360px;padding:24px;text-align:center}h1{font-size:22px}</style></head>
-<body><main>${paid
-      ? "<h1>Payment received</h1><p>Thank you! Your booking is confirmed. You can close this page and return to WhatsApp.</p>"
-      : "<h1>Payment not confirmed yet</h1><p>If you completed the payment, you'll get a WhatsApp confirmation shortly. Otherwise, go back to WhatsApp and type hi to try again.</p>"}</main></body></html>`)
+    const icon = paid ? "&#10003;" : "!"
+    const title = paid ? "Payment received" : "Payment not confirmed yet"
+    const body = paid
+      ? "Thank you! Your booking is confirmed and the details are on WhatsApp. You can close this page."
+      : "If you completed the payment, you'll get a WhatsApp confirmation shortly. Otherwise go back to WhatsApp and type <b>hi</b> to try again."
+    res.type("html").send(`<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>WasteCore - ${title}</title>
+<style>
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+    background:#eef6ee;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#17301d;padding:16px;box-sizing:border-box}
+  .card{background:#fff;max-width:380px;width:100%;border-radius:18px;padding:32px 24px;text-align:center;
+    box-shadow:0 10px 30px rgba(23,48,29,.10)}
+  .brand{font-weight:700;color:#2e8b3a;letter-spacing:.3px;margin-bottom:20px}
+  .icon{width:64px;height:64px;border-radius:50%;margin:0 auto 16px;display:flex;align-items:center;justify-content:center;
+    font-size:32px;font-weight:700;color:#fff;background:${paid ? "#2e8b3a" : "#e0a100"}}
+  h1{font-size:22px;margin:0 0 8px}
+  p{margin:0 0 24px;line-height:1.5;color:#41584a}
+  a.btn{display:block;background:#25d366;color:#fff;text-decoration:none;font-weight:600;padding:14px;border-radius:12px}
+</style></head>
+<body><main class="card">
+  <div class="brand">WasteCore</div>
+  <div class="icon">${icon}</div>
+  <h1>${title}</h1>
+  <p>${body}</p>
+  <a class="btn" href="https://wa.me/${WHATSAPP_BUSINESS_NUMBER}">Back to WhatsApp</a>
+</main></body></html>`)
   })
 
   app.get("/health", (req, res) => {
