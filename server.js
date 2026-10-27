@@ -122,8 +122,8 @@ const MAX_BAGS_PER_PICKUP = 50
 
 const SERVICE_MENU =
   `Choose service:\n` +
-  `1 - Instant Pickup (NGN 1,000 per bag)\n` +
-  `2 - Schedule a Pickup (NGN 650 per bag)\n` +
+  `1 - Instant Pickup\n` +
+  `2 - Schedule a Pickup\n` +
   `3 - Monthly Subscription\n` +
   `4 - Order Waste Bags\n` +
   `5 - Speak to Support`
@@ -591,7 +591,8 @@ nextApp.prepare().then(() => {
     const askBagsOrDate = async () => {
       const perBag = PICKUP_PRICE_PER_BAG[session.data.serviceType]
       if (perBag) {
-        await send(`How many bags of waste do you want to dispose?\n\nNGN ${perBag.toLocaleString()} per bag. Reply with a number, e.g. 3.`)
+        // The per-bag price is only shown once, in the calculation.
+        await send("How many bags of waste do you want to dispose?\n\nReply with a number, e.g. 3.")
         session.step = "pickup_bags"
       } else {
         await askPickupDate()
