@@ -406,10 +406,11 @@ async function saveCustomer(from, fields) {
 }
 
 // ================= ABOUT WASTECORE =================
-// Menu option 6. The text below is sent first, then every image in
-// public/about/ (in filename order, e.g. 1-trucks.jpg, 2-flyer.png), then the
-// menu again. To change the pictures, add or remove files in that folder;
+// Menu option 6. The text below is sent first, then every picture or video
+// in public/about/ (in filename order, e.g. 1-flyer.jpg, 2-how-it-works.mp4),
+// then the menu again. To change them, add or remove files in that folder;
 // captions are optional and keyed by filename in ABOUT_CAPTIONS.
+// WhatsApp limits: pictures JPG/PNG up to 5 MB, videos MP4 up to 16 MB.
 const ABOUT_TEXT = [
   "\u267B\uFE0F *About WasteCore*",
   "",
@@ -435,24 +436,25 @@ const ABOUT_CAPTIONS = {
 }
 
 const ABOUT_DIR = require("path").join(__dirname, "public", "about")
-const MAX_ABOUT_IMAGES = 6
+const MAX_ABOUT_MEDIA = 6
+const isVideo = (file) => /\.mp4$/i.test(file)
 
-function aboutImages() {
+function aboutMedia() {
   try {
     return require("fs").readdirSync(ABOUT_DIR)
-      .filter((f) => /\.(jpe?g|png)$/i.test(f))
+      .filter((f) => /\.(jpe?g|png|mp4)$/i.test(f))
       .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
-      .slice(0, MAX_ABOUT_IMAGES)
+      .slice(0, MAX_ABOUT_MEDIA)
   } catch {
     return []
   }
 }
 
 /**
- * Sends a picture by public URL through Meta's Cloud API (same token and
- * number as the Pay button). Returns false if it couldn't be sent.
+ * Sends a picture or video by public URL through Meta's Cloud API (same
+ * token and number as the Pay button). Returns false if it couldn't be sent.
  */
-async function sendWhatsAppImage(to, { url, caption, phoneNumberId }) {
+async function sendWhatsAppMedia(to, { type, url, caption, phoneNumberId }) {
   const numberId = process.env.WHATSAPP_PHONE_NUMBER_ID || phoneNumberId
   const token = process.env.WHATSAPP_ACCESS_TOKEN
   const phone = normalizePhone(to).replace(/\D/g, "")
@@ -464,14 +466,14 @@ async function sendWhatsAppImage(to, { url, caption, phoneNumberId }) {
         messaging_product: "whatsapp",
         recipient_type: "individual",
         to: phone,
-        type: "image",
-        image: { link: url, ...(caption ? { caption: caption.slice(0, 1024) } : {}) },
+        type,
+        [type]: { link: url, ...(caption ? { caption: caption.slice(0, 1024) } : {}) },
       },
       { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, timeout: 15000 }
     )
     return Boolean(res.data?.messages?.[0]?.id)
   } catch (err) {
-    console.error("WhatsApp image message failed:", err.response?.data || err.message)
+    console.error(`WhatsApp ${type} message failed:`, err.response?.data || err.message)
     return false
   }
 }
@@ -1191,13 +1193,14 @@ nextApp.prepare().then(() => {
       await beginService()
     }
 
-    // Menu option 6: what WasteCore does, pictures, then the menu again so
+    // Menu option 6: what WasteCore does, pictures/videos, then the menu again so
     // the customer can book straight away.
     const sendAbout = async () => {
       await send(ABOUT_TEXT)
-      const files = PUBLIC_BASE_URL ? aboutImages() : []
+      const files = PUBLIC_BASE_URL ? aboutMedia() : []
       for (const file of files) {
-        await sendWhatsAppImage(from, {
+        await sendWhatsAppMedia(from, {
+          type: isVideo(file) ? "video" : "image",
           url: `${PUBLIC_BASE_URL}/about/${encodeURIComponent(file)}`,
           caption: ABOUT_CAPTIONS[file],
           phoneNumberId,
@@ -1945,7 +1948,7 @@ nextApp.prepare().then(() => {
 </main></body></html>`)
   })
 
-  // Pictures for the "About WasteCore" option; WhatsApp fetches them by URL.
+  // Pictures and videos for the "About WasteCore" option; WhatsApp fetches them by URL.
   app.use("/about", express.static(ABOUT_DIR, { maxAge: "1h" }))
 
   app.get("/health", (req, res) => {
