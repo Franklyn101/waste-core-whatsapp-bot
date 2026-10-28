@@ -344,6 +344,37 @@ function setupStatusListeners() {
 }
 
 // ================= HELPERS =================
+// ================= CUSTOMER PROFILES =================
+// Saved per WhatsApp number so returning customers aren't asked their name
+// again. Document id = phone digits.
+const customerId = (from) => normalizePhone(from).replace(/\D/g, "")
+
+async function loadCustomer(from) {
+  const ref = db.collection("customers").doc(customerId(from))
+  const snap = await ref.get()
+  if (snap.exists) return snap.data()
+
+  // Customers who booked before profiles existed: reuse the name from a
+  // past booking so they aren't asked again.
+  for (const col of ["instantPickups", "pickupRequests", "upgradeRequests", "wasteBagOrders"]) {
+    const past = await db.collection(col).where("customerPhone", "==", from).limit(1).get()
+    const name = past.empty ? null : past.docs[0].data().customerName
+    if (name) {
+      const profile = { name, createdAt: new Date().toISOString() }
+      await ref.set(profile, { merge: true })
+      return profile
+    }
+  }
+  return null
+}
+
+async function saveCustomer(from, fields) {
+  await db.collection("customers").doc(customerId(from)).set(
+    { ...fields, phone: normalizePhone(from), updatedAt: new Date().toISOString() },
+    { merge: true }
+  )
+}
+
 // ================= WHATSAPP BUTTON MESSAGES =================
 /**
  * Sends a message with a tappable URL button (WhatsApp "cta_url"
@@ -415,10 +446,18 @@ function buildCheckout(d, from) {
       amount,
       description: `${label} (monthly)`,
       title: `${label.replace(" - ", " plan \u00B7 ")}`,
-      details: [`\u{1F4CD} ${d.address}`, `\u{1F4C5} Starts ${displayDate(d.startDate)}`],
+      details: [
+        ...(d.planCategory === "business" && d.businessName ? [`\u{1F3E2} ${d.businessName}`] : []),
+        `\u{1F4CD} ${d.address}`,
+        `\u{1F4C5} Starts ${displayDate(d.startDate)}`,
+      ],
       totalText: `${naira(amount)}/month`,
       doc: {
-        customerName: d.name, customerPhone: from, address: d.address,
+        // Business plans are booked under the business name.
+        customerName: d.planCategory === "business" ? (d.businessName || d.name) : d.name,
+        businessName: d.planCategory === "business" ? (d.businessName ?? null) : null,
+        contactName: d.name ?? null,
+        customerPhone: from, address: d.address,
         plan: d.upgradePlan, planCategory: d.planCategory ?? null, planLabel: label,
         serviceType: d.serviceType, startDate: d.startDate, totalAmount: amount,
       },
@@ -818,6 +857,42 @@ nextApp.prepare().then(() => {
 
     const send = (text) => sendWhatsAppMessage(from, text)
 
+    // Loads the saved name (and business name) once per conversation.
+    const ensureProfile = async () => {
+      if (session.data.profileLoaded) return
+      const profile = await loadCustomer(from)
+      if (profile?.name && !session.data.name) session.data.name = profile.name
+      if (profile?.businessName && !session.data.businessName) session.data.businessName = profile.businessName
+      session.data.profileLoaded = true
+    }
+
+    const sendServiceMenu = async () => {
+      await ensureProfile()
+      const greeting = session.data.name
+        ? `Welcome back, ${displayName(session.data.name)}! \u{1F44B}`
+        : "Welcome to WasteCore! \u267B\uFE0F"
+      await send(`${greeting}\n\n${SERVICE_MENU}\n\nReply with a number. Type *cancel* anytime to restart.`)
+      session.step = "1.5"
+    }
+
+    // After a service is picked: monthly plans ask for a name later (business
+    // or household); everything else needs the customer's name, asked only
+    // if we don't already have it.
+    const continueWithService = async () => {
+      await ensureProfile()
+      if (session.data.serviceType !== "upgrade" && !session.data.name) {
+        await send("What is your full name?")
+        session.step = "1"
+        return
+      }
+      await beginService()
+    }
+
+    const showMonthlyPlans = async () => {
+      await send(monthlyPlansMenu(session.data.planCategory))
+      session.step = "upgrade_select"
+    }
+
     // Sends the first question of the chosen service and moves to its step.
     const beginService = async () => {
       switch (session.data.serviceType) {
@@ -849,7 +924,7 @@ nextApp.prepare().then(() => {
           const payLabel = `Pay ${naira(checkout.amount)}`
           const sentButton = await sendWhatsAppUrlButton(from, {
             body:
-              `Thanks, ${displayName(session.data.name)}! Here's your order:\n\n${orderSummary(checkout)}\n\n` +
+              `Thanks, ${displayName(session.data.name || session.data.businessName)}! Here's your order:\n\n${orderSummary(checkout)}\n\n` +
               `Tap *${payLabel}* below to pay securely by card, bank transfer or USSD. ` +
               `We'll confirm your booking right here as soon as your payment goes through.`,
             buttonText: payLabel,
@@ -862,7 +937,7 @@ nextApp.prepare().then(() => {
             return
           }
           await send(
-            `Thanks, ${displayName(session.data.name)}! Here's your order:\n\n${orderSummary(checkout)}\n\n` +
+            `Thanks, ${displayName(session.data.name || session.data.businessName)}! Here's your order:\n\n${orderSummary(checkout)}\n\n` +
             `\u{1F447} *Tap the link below to pay ${naira(checkout.amount)}*\n${link}\n\n` +
             `\u{1F4B3} Card  \u00B7  \u{1F3E6} Bank transfer  \u00B7  \u{1F4F1} USSD\n` +
             `\u{1F512} Secured by Paystack\n\n` +
@@ -873,7 +948,7 @@ nextApp.prepare().then(() => {
         }
       }
       await send(
-        `Thanks, ${displayName(session.data.name)}! Here's your order:\n\n${orderSummary(checkout)}\n\n` +
+        `Thanks, ${displayName(session.data.name || session.data.businessName)}! Here's your order:\n\n${orderSummary(checkout)}\n\n` +
         `\u{1F3E6} *Pay by bank transfer*\n${BANK_DETAILS}\n\n` +
         `\u{1F4F8} After paying, send a photo of your payment receipt here.`
       )
@@ -935,43 +1010,36 @@ nextApp.prepare().then(() => {
         // ── ENTRY ──────────────────────────────────────────────────────────
         case "0":
           if (msg === "hi" || msg === "hello") {
-            await send(`Welcome to WasteCore\n\n1 - Book Pickup\n\nReply with 1 to start. Type cancel anytime to restart.`)
-            session.step = "0.5"
+            await sendServiceMenu()
           } else {
             await send("To start, type hi.")
           }
           break
 
+        // Older conversations waiting at the retired "Book Pickup" prompt.
         case "0.5":
-          if (msg === "1") {
-            await send("What is your full name?")
-            session.step = "1"
-          } else {
-            await send("Reply with 1 to start.")
-          }
+          await sendServiceMenu()
           break
 
         // ── ACTIVE-REQUEST SIDE MENU ───────────────────────────────────────
         case "active_menu":
           if (msg === "1") {
-            await send("What is your full name?")
-            session.step = "1"
+            await sendServiceMenu()
           } else if (msg === "2") {
             session.data.serviceType = "wasteBags"
-            await send("What is your full name?")
-            session.step = "1"
+            await continueWithService()
           } else if (msg === "3") {
             session.data.serviceType = "support"
-            await send("What is your full name?")
-            session.step = "1"
+            await continueWithService()
           } else {
             await send("Please reply with 1, 2, or 3.")
           }
           break
 
-        // ── NAME & SERVICE SELECTION ───────────────────────────────────────
+        // ── NAME (new customers only) & SERVICE SELECTION ──────────────────
         case "1":
           session.data.name = rawMsg.substring(0, 100)
+          await saveCustomer(from, { name: session.data.name })
           if (!session.data.serviceType) {
             await send(SERVICE_MENU)
             session.step = "1.5"
@@ -987,7 +1055,7 @@ nextApp.prepare().then(() => {
           else if (msg === "4") session.data.serviceType = "wasteBags"
           else if (msg === "5") session.data.serviceType = "support"
           else { await send("Reply 1-5."); break }
-          await beginService()
+          await continueWithService()
           break
 
         // ── WEEKLY PICKUP PLAN SELECTION (retired) ─────────────────────────
@@ -1088,8 +1156,30 @@ nextApp.prepare().then(() => {
           if      (msg === "1") session.data.planCategory = "business"
           else if (msg === "2") session.data.planCategory = "household"
           else { await send("Please reply 1 for Business or 2 for Household."); break }
-          await send(monthlyPlansMenu(session.data.planCategory))
-          session.step = "upgrade_select"
+          await ensureProfile()
+          if (session.data.planCategory === "business" && !session.data.businessName) {
+            await send("What is the name of your business?")
+            session.step = "business_name"
+            break
+          }
+          if (session.data.planCategory === "household" && !session.data.name) {
+            await send("What is your full name?")
+            session.step = "household_name"
+            break
+          }
+          await showMonthlyPlans()
+          break
+
+        case "business_name":
+          session.data.businessName = rawMsg.substring(0, 120)
+          await saveCustomer(from, { businessName: session.data.businessName })
+          await showMonthlyPlans()
+          break
+
+        case "household_name":
+          session.data.name = rawMsg.substring(0, 100)
+          await saveCustomer(from, { name: session.data.name })
+          await showMonthlyPlans()
           break
 
         case "upgrade_select":
