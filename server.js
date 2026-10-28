@@ -414,7 +414,7 @@ async function saveCustomer(from, fields) {
 const ABOUT_TEXT = [
   "\u267B\uFE0F *About WasteCore*",
   "",
-  "We collect bagged waste from homes and businesses and dispose of it responsibly. " +
+  "We collect bagged waste from homes and businesses across Yenagoa and dispose of it responsibly. " +
     "You book, pay and get updates right here on WhatsApp.",
   "",
   "\u{1F69B} *Instant Pickup* \u2014 we come as soon as possible.",
@@ -432,7 +432,10 @@ const ABOUT_TEXT = [
 ].join("\n")
 
 const ABOUT_CAPTIONS = {
-  // "1-trucks.jpg": "Our pickup trucks",
+  "1-flyer.jpg": "Reliable, on-time, affordable waste pickup for homes and businesses in Yenagoa.",
+  "2-how-it-works.mp4": "How WasteCore works: book, pay and get your waste picked up, all on WhatsApp.",
+  "3-cart-scan-to-book.jpg": "Spot our green carts around Yenagoa. Scan the QR code to book a pickup.",
+  "4-cart.jpg": "Save our number: +234 811 750 1757",
 }
 
 const ABOUT_DIR = require("path").join(__dirname, "public", "about")
