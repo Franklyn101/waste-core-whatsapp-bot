@@ -127,7 +127,8 @@ const SERVICE_MENU =
   `2 - Schedule a Pickup\n` +
   `3 - Monthly Subscription\n` +
   `4 - Order Waste Bags\n` +
-  `5 - Speak to Support`
+  `5 - Speak to Support\n` +
+  `6 - About WasteCore & our services`
 
 // Monthly subscription plans, by category. Plan ids are "<category>_<pickups per week>".
 const MONTHLY_PLANS = {
@@ -402,6 +403,77 @@ async function saveCustomer(from, fields) {
     { ...fields, phone: normalizePhone(from), updatedAt: new Date().toISOString() },
     { merge: true }
   )
+}
+
+// ================= ABOUT WASTECORE =================
+// Menu option 6. The text below is sent first, then every image in
+// public/about/ (in filename order, e.g. 1-trucks.jpg, 2-flyer.png), then the
+// menu again. To change the pictures, add or remove files in that folder;
+// captions are optional and keyed by filename in ABOUT_CAPTIONS.
+const ABOUT_TEXT = [
+  "\u267B\uFE0F *About WasteCore*",
+  "",
+  "We collect bagged waste from homes and businesses and dispose of it responsibly. " +
+    "You book, pay and get updates right here on WhatsApp.",
+  "",
+  "\u{1F69B} *Instant Pickup* \u2014 we come as soon as possible.",
+  "\u{1F4C5} *Scheduled Pickup* \u2014 you choose the date and time window.",
+  "_Both are priced per bag; you see the total before you pay._",
+  "",
+  "\u{1F5D3} *Monthly Subscription* \u2014 regular pickups every week.",
+  `   \u2022 Household: from ${"\u20A6"}${MONTHLY_PLANS.household.prices[1].toLocaleString()}/month`,
+  `   \u2022 Business: from ${"\u20A6"}${MONTHLY_PLANS.business.prices[1].toLocaleString()}/month`,
+  "",
+  "\u{1F6CD} *Waste Bags* \u2014 packs of 10, delivered to you.",
+  "\u{1F4AC} *Support* \u2014 talk to our team about anything.",
+  "",
+  "\u{1F4B3} Pay securely by card, bank transfer or USSD.",
+].join("\n")
+
+const ABOUT_CAPTIONS = {
+  // "1-trucks.jpg": "Our pickup trucks",
+}
+
+const ABOUT_DIR = require("path").join(__dirname, "public", "about")
+const MAX_ABOUT_IMAGES = 6
+
+function aboutImages() {
+  try {
+    return require("fs").readdirSync(ABOUT_DIR)
+      .filter((f) => /\.(jpe?g|png)$/i.test(f))
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+      .slice(0, MAX_ABOUT_IMAGES)
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Sends a picture by public URL through Meta's Cloud API (same token and
+ * number as the Pay button). Returns false if it couldn't be sent.
+ */
+async function sendWhatsAppImage(to, { url, caption, phoneNumberId }) {
+  const numberId = process.env.WHATSAPP_PHONE_NUMBER_ID || phoneNumberId
+  const token = process.env.WHATSAPP_ACCESS_TOKEN
+  const phone = normalizePhone(to).replace(/\D/g, "")
+  if (!numberId || !token || !phone) return false
+  try {
+    const res = await axios.post(
+      `https://graph.facebook.com/v19.0/${numberId}/messages`,
+      {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to: phone,
+        type: "image",
+        image: { link: url, ...(caption ? { caption: caption.slice(0, 1024) } : {}) },
+      },
+      { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, timeout: 15000 }
+    )
+    return Boolean(res.data?.messages?.[0]?.id)
+  } catch (err) {
+    console.error("WhatsApp image message failed:", err.response?.data || err.message)
+    return false
+  }
 }
 
 // ================= WHATSAPP BUTTON MESSAGES =================
@@ -1119,6 +1191,22 @@ nextApp.prepare().then(() => {
       await beginService()
     }
 
+    // Menu option 6: what WasteCore does, pictures, then the menu again so
+    // the customer can book straight away.
+    const sendAbout = async () => {
+      await send(ABOUT_TEXT)
+      const files = PUBLIC_BASE_URL ? aboutImages() : []
+      for (const file of files) {
+        await sendWhatsAppImage(from, {
+          url: `${PUBLIC_BASE_URL}/about/${encodeURIComponent(file)}`,
+          caption: ABOUT_CAPTIONS[file],
+          phoneNumberId,
+        })
+      }
+      await send(`Ready to book? \u{1F447}\n\n${SERVICE_MENU}\n\nReply with a number.`)
+      session.step = "1.5"
+    }
+
     const showMonthlyPlans = async () => {
       await send(monthlyPlansMenu(session.data.planCategory))
       session.step = "upgrade_select"
@@ -1314,7 +1402,8 @@ nextApp.prepare().then(() => {
           else if (msg === "3") session.data.serviceType = "upgrade"
           else if (msg === "4") session.data.serviceType = "wasteBags"
           else if (msg === "5") session.data.serviceType = "support"
-          else { await send("Reply 1-5."); break }
+          else if (msg === "6") { await sendAbout(); break }
+          else { await send("Reply with a number from 1 to 6."); break }
           await continueWithService()
           break
 
@@ -1855,6 +1944,9 @@ nextApp.prepare().then(() => {
   <a class="btn" href="https://wa.me/${businessNumber()}">Back to WhatsApp</a>
 </main></body></html>`)
   })
+
+  // Pictures for the "About WasteCore" option; WhatsApp fetches them by URL.
+  app.use("/about", express.static(ABOUT_DIR, { maxAge: "1h" }))
 
   app.get("/health", (req, res) => {
     res.json({ status: "OK", timestamp: new Date().toISOString() })
