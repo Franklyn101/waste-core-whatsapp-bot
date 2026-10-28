@@ -65,7 +65,6 @@ import {
   SUBSCRIPTION_KINDS,
   SUBSCRIPTION_PLANS,
   TIME_WINDOWS,
-  WASTE_TYPES,
   WEEK_DAYS,
   findPlan,
   nextPickupDate,
@@ -90,7 +89,7 @@ const EMPTY_FORM: SubscriberInput = {
   customerName: "",
   customerPhone: "",
   address: "",
-  wasteType: "General",
+  wasteType: "",
   planId: "weekly_1",
   pickupDays: [],
   timeWindow: "morning",
@@ -169,7 +168,7 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
       customerName: row.customerName,
       customerPhone: row.customerPhone,
       address: row.address,
-      wasteType: row.wasteType || "General",
+      wasteType: row.wasteType || "",
       planId: row.planId,
       pickupDays: row.pickupDays,
       timeWindow: row.timeWindow || "morning",
@@ -221,7 +220,6 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
       return setFormError("Enter a valid phone number, e.g. +2348012345678.")
     }
     if (!input.address) return setFormError("Pickup address is required.")
-    if (!input.wasteType) return setFormError("Choose the type of waste.")
     if (!plan) return setFormError("Choose a plan.")
     if (input.pickupDays.length !== plan.pickupsPerWeek) {
       return setFormError(`Pick exactly ${plan.pickupsPerWeek} pickup day${plan.pickupsPerWeek > 1 ? "s" : ""} for this plan.`)
@@ -257,9 +255,6 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
   const formKind = plan?.kind ?? "business"
   // Retired weekly plans: only show the tab when there are records on them.
   const visibleKinds = SUBSCRIPTION_KINDS.filter((k) => k.id !== "weekly" || rows.some((r) => r.kind === "weekly"))
-  const wasteOptions = WASTE_TYPES.includes(form.wasteType) || !form.wasteType
-    ? WASTE_TYPES
-    : [form.wasteType, ...WASTE_TYPES]
 
   if (isLoading) {
     return (
@@ -326,7 +321,6 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
               <TableRow>
                 <TableHead>Customer</TableHead>
                 <TableHead>Address</TableHead>
-                <TableHead>Waste</TableHead>
                 <TableHead>Plan</TableHead>
                 <TableHead>Schedule</TableHead>
                 <TableHead>Next pickup</TableHead>
@@ -352,9 +346,6 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
                         <MapPin className="h-4 w-4 flex-shrink-0 text-gray-400" />
                         <span className="truncate text-sm">{r.address || "—"}</span>
                       </div>
-                    </TableCell>
-                    <TableCell>
-                      {r.wasteType ? <Badge variant="outline">{r.wasteType}</Badge> : <span className="text-muted-foreground">—</span>}
                     </TableCell>
                     <TableCell>
                       <div className="text-sm font-medium">{rowPlan?.label ?? r.planId}</div>
@@ -448,7 +439,7 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
             <DialogDescription>
               {form.linkedRequestId && !editingId
                 ? "Add a schedule for this WhatsApp subscription. It will then be managed here."
-                : "Customer details, type of waste and pickup schedule."}
+                : "Customer details and pickup schedule."}
             </DialogDescription>
           </DialogHeader>
           <form className="space-y-4" onSubmit={(e) => { e.preventDefault(); handleSave() }}>
@@ -472,15 +463,6 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
             </div>
 
             <div className="grid gap-4 sm:grid-cols-2">
-              <div className="space-y-2">
-                <Label>Type of waste</Label>
-                <Select value={form.wasteType} onValueChange={(v) => setForm({ ...form, wasteType: v })}>
-                  <SelectTrigger className="w-full"><SelectValue placeholder="Choose waste type" /></SelectTrigger>
-                  <SelectContent>
-                    {wasteOptions.map((w) => <SelectItem key={w} value={w}>{w}</SelectItem>)}
-                  </SelectContent>
-                </Select>
-              </div>
               <div className="space-y-2">
                 <Label>Subscription</Label>
                 <Select

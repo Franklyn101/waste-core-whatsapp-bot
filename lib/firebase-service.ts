@@ -68,6 +68,7 @@ function normalizeRequest(data: any, id: string): WasteRequest {
     timeWindow:        data.timeWindow ?? "",
     bagCount:          data.bagCount ?? null,
     totalAmount:       data.totalAmount ?? null,
+    needsReschedule:   data.needsReschedule === true,
     createdAt,
     updatedAt,
   }

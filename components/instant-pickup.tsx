@@ -212,7 +212,15 @@ export function InstantPickupTable({ searchQuery = "" }: InstantPickupTableProps
                   <TableCell>
                     <div className="flex items-center gap-2">
                       <Calendar className="w-4 h-4 text-gray-400" />
-                      <span className="text-sm">{request.pickupDate}</span>
+                      <div>
+                        <span className="text-sm">{request.pickupDate}</span>
+                        {(request as any).needsReschedule && (
+                          <div className="mt-0.5 inline-block rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-800"
+                            title="Paid after this date had passed. Contact the customer to agree a new date.">
+                            Needs new date
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </TableCell>
                   <TableCell>
