@@ -232,13 +232,15 @@ async function sendWhatsAppMessage(to, message) {
  * SETUP REQUIRED — create two approved templates in your Flaxxa dashboard:
  *
  *   1. name: "driver_assigned"   language: en_US
- *      body: "Driver {{1}} has been assigned to your pickup on {{2}}."
+ *      body: "Good news! {{1}} has been assigned to your pickup on {{2}}."
+ *      ({{1}} is sent as "a WasteCore collector"; collector names stay private.)
  *
  *   2. name: "pickup_completed"  language: en_US
  *      body: "Your pickup scheduled for {{1}} has been completed. Thank you for choosing WasteCore."
  *
- * Rename the template_name strings in setupStatusListeners() if you use
- * different names in the Flaxxa dashboard.
+ * If you use different names, set WAPI_TEMPLATE_ASSIGNED and
+ * WAPI_TEMPLATE_COMPLETED. When a template can't be sent the customer gets
+ * a plain message instead (delivered if they messaged in the last 24 hours).
  */
 async function sendWhatsAppTemplate(to, templateName, language = "en_US", components = []) {
   try {
@@ -264,6 +266,30 @@ async function sendWhatsAppTemplate(to, templateName, language = "en_US", compon
 }
 
 // ================= FIRESTORE LISTENERS =================
+// Template names as created in the Flaxxa dashboard (see above).
+const TEMPLATE_ASSIGNED = process.env.WAPI_TEMPLATE_ASSIGNED || "driver_assigned"
+const TEMPLATE_COMPLETED = process.env.WAPI_TEMPLATE_COMPLETED || "pickup_completed"
+
+// Flaxxa answers 200 even for some failures, so check the body too.
+const templateSent = (data) =>
+  Boolean(data) && !data.error && data.status !== false && data.status !== "error" && data.success !== false
+
+// Sends an approved template; if that fails (e.g. the template is missing
+// in Flaxxa) falls back to a plain message, which still reaches customers
+// who messaged the bot in the last 24 hours.
+async function notifyCustomer(phone, templateName, params, fallbackText) {
+  const data = await sendWhatsAppTemplate(phone, templateName, "en_US", [
+    { type: "body", parameters: params.map((text) => ({ type: "text", text: String(text ?? "") })) },
+  ])
+  if (templateSent(data)) return
+  console.warn(`Template "${templateName}" not sent to ${phone}; sending a plain message instead.`)
+  await sendWhatsAppMessage(phone, fallbackText)
+}
+
+// Bookings paid by Paystack (or a bank transfer an admin has checked)
+// count as paid; receipt photos nobody has checked yet do not.
+const paymentVerified = (data) => data.paymentMethod === "paystack" || data.paymentStatus === "paid"
+
 function setupStatusListeners() {
   const handleChanges = (collectionName) => {
     db.collection(collectionName).onSnapshot(
@@ -280,51 +306,54 @@ function setupStatusListeners() {
           }
 
           if (change.type === "modified") {
+            // An admin verified a bank-transfer receipt after the pickup was
+            // completed: mark its invoice paid.
+            if (paymentVerified(data) && data.invoiceStatus === "awaiting_verification") {
+              const invoices = await db.collection("invoices").where("relatedPickupId", "==", change.doc.id).get()
+              await Promise.all(invoices.docs.map((inv) => inv.ref.update({ status: "paid", updatedAt: new Date().toISOString() })))
+              await change.doc.ref.update({ invoiceStatus: "paid" })
+            }
+
             // Only notify on a status change. Other edits (e.g. reassigning a
             // collector) also fire "modified" and must not re-send messages
             // or create duplicate invoices.
             if (data.status === data.notifiedStatus) return
             await change.doc.ref.update({ notifiedStatus: data.status ?? null })
 
-            if (data.status === "assigned") {
-              await sendWhatsAppTemplate(
+            const date = data.pickupDate ? displayDate(data.pickupDate) : null
+            const isPickup = collectionName === "instantPickups" || collectionName === "pickupRequests"
+
+            // "confirmed" is the older name for "assigned" on scheduled pickups
+            // (waste bag orders also use "confirmed", but get no collector).
+            if (isPickup && (data.status === "assigned" || data.status === "confirmed")) {
+              await notifyCustomer(
                 data.customerPhone,
-                "driver_assigned",
-                "en_US",
-                [
-                  {
-                    type: "body",
-                    parameters: [
-                      // Collector details are admin-only; never sent to customers.
-                      { type: "text", text: "your driver" },
-                      { type: "text", text: data.pickupDate },
-                    ],
-                  },
-                ]
+                TEMPLATE_ASSIGNED,
+                // Collector details are admin-only; never sent to customers.
+                ["a WasteCore collector", date || "the agreed date"],
+                `\u{1F69B} *Collector assigned*\n\nA WasteCore collector has been assigned to your pickup${date ? ` on ${date}` : ""}. ` +
+                `We'll message you when it's done.`
               )
             }
 
             if (data.status === "completed") {
-              await sendWhatsAppTemplate(
+              await notifyCustomer(
                 data.customerPhone,
-                "pickup_completed",
-                "en_US",
-                [
-                  {
-                    type: "body",
-                    parameters: [
-                      { type: "text", text: data.pickupDate },
-                    ],
-                  },
-                ]
+                TEMPLATE_COMPLETED,
+                [date || "today"],
+                `\u2705 *Pickup completed*\n\nYour pickup${date ? ` on ${date}` : ""} has been completed. Thank you for choosing WasteCore! \u267B\uFE0F`
               )
+              const verified = paymentVerified(data)
               await db.collection("invoices").add({
                 customerPhone: data.customerPhone,
                 amount: data.totalAmount ?? SERVICE_PRICES[data.serviceType] ?? 0,
-                status: "paid",
+                status: verified ? "paid" : "awaiting_verification",
+                paymentMethod: data.paymentMethod ?? null,
                 relatedPickupId: change.doc.id,
+                relatedCollection: collectionName,
                 createdAt: new Date().toISOString(),
               })
+              if (!verified) await change.doc.ref.update({ invoiceStatus: "awaiting_verification" })
             }
           }
          } catch (err) {
@@ -428,6 +457,34 @@ function displayDate(iso) {
   const d = new Date(`${iso}T00:00:00`)
   if (isNaN(d.getTime())) return iso
   return d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })
+}
+
+// Today's date in Nigeria as YYYY-MM-DD (the server clock runs on UTC).
+const lagosToday = () =>
+  new Intl.DateTimeFormat("en-CA", { timeZone: "Africa/Lagos" }).format(new Date())
+
+function addDays(iso, n) {
+  const d = new Date(`${iso}T00:00:00Z`)
+  d.setUTCDate(d.getUTCDate() + n)
+  return d.toISOString().slice(0, 10)
+}
+
+// Reads a date the way customers type it: "2026-03-30", "30/03/2026",
+// "30-3-2026", "today" or "tomorrow". Day comes first, as in Nigeria.
+// Returns YYYY-MM-DD, or null if it isn't a real date.
+function parseDateInput(text) {
+  const t = String(text || "").trim().toLowerCase()
+  if (t === "today") return lagosToday()
+  if (t === "tomorrow") return addDays(lagosToday(), 1)
+  let y, m, d
+  let match = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/)
+  if (match) [, y, m, d] = match
+  else if ((match = t.match(/^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})$/))) [, d, m, y] = match
+  else return null
+  const iso = `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`
+  const check = new Date(`${iso}T00:00:00Z`)
+  // Rejects dates like 31/02 that JavaScript would roll over into March.
+  return !isNaN(check.getTime()) && check.toISOString().slice(0, 10) === iso ? iso : null
 }
 
 const bagsText = (n) => `${n} bag${n > 1 ? "s" : ""}`
@@ -548,8 +605,31 @@ const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY
 const PAYSTACK_API = "https://api.paystack.co"
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "")
 const PAYSTACK_EMAIL_DOMAIN = process.env.PAYSTACK_CUSTOMER_EMAIL_DOMAIN || "customers.wastecore.ng"
-// Business WhatsApp number for the "Back to WhatsApp" button (digits only).
-const WHATSAPP_BUSINESS_NUMBER = (process.env.WHATSAPP_BUSINESS_NUMBER || "2348117501757").replace(/\D/g, "")
+// Business WhatsApp number for the "Back to WhatsApp" button (digits only):
+// WHATSAPP_BUSINESS_NUMBER if set, otherwise the number customers actually
+// message, learnt from incoming webhooks and saved in config/whatsapp.
+const DEFAULT_BUSINESS_NUMBER = "2348117501757"
+let learnedBusinessNumber = null
+
+function businessNumber() {
+  return (process.env.WHATSAPP_BUSINESS_NUMBER || learnedBusinessNumber || DEFAULT_BUSINESS_NUMBER).replace(/\D/g, "")
+}
+
+async function loadBusinessNumber() {
+  try {
+    const snap = await db.collection("config").doc("whatsapp").get()
+    if (snap.exists && snap.data().displayNumber) learnedBusinessNumber = snap.data().displayNumber
+  } catch (err) {
+    console.error("Could not load the saved WhatsApp number:", err.message)
+  }
+}
+
+async function rememberBusinessNumber(displayNumber) {
+  const digits = String(displayNumber || "").replace(/\D/g, "")
+  if (!digits || digits === learnedBusinessNumber) return
+  learnedBusinessNumber = digits
+  await db.collection("config").doc("whatsapp").set({ displayNumber: digits, updatedAt: new Date().toISOString() }, { merge: true })
+}
 
 const paystackEnabled = () => Boolean(PAYSTACK_SECRET_KEY)
 
@@ -602,7 +682,7 @@ async function createPaystackPayment(checkout, from) {
 
 // Turns a confirmed payment into a booking exactly once (duplicate webhooks
 // and the return page can both arrive) and messages the customer.
-async function finalizePaystackPayment(reference, paidKobo, channel) {
+async function finalizePaystackPayment(reference, paidKobo, channel, customerPhone) {
   const pendingRef = db.collection("pendingPayments").doc(reference)
   const result = await db.runTransaction(async (t) => {
     const snap = await t.get(pendingRef)
@@ -613,6 +693,11 @@ async function finalizePaystackPayment(reference, paidKobo, channel) {
       t.update(pendingRef, { status: "amount_mismatch", paidKobo: Number(paidKobo), updatedAt: new Date().toISOString() })
       return { outcome: "amount_mismatch", p }
     }
+    // A link paid days later can carry a pickup/start date that has passed.
+    // The money is real, so the booking is still made, flagged for the team
+    // to agree a new date with the customer.
+    const bookedDate = p.doc?.pickupDate || p.doc?.startDate
+    const datePassed = Boolean(bookedDate) && bookedDate < lagosToday()
     const bookingRef = db.collection(p.collection).doc()
     t.set(bookingRef, bookingRecord(p, {
       paymentMethod: "paystack",
@@ -620,13 +705,20 @@ async function finalizePaystackPayment(reference, paidKobo, channel) {
       paymentChannel: channel || null,
       paymentStatus: "paid",
       paidAt: new Date().toISOString(),
+      ...(datePassed ? { needsReschedule: true } : {}),
     }))
     t.update(pendingRef, { status: "paid", bookingCollection: p.collection, bookingId: bookingRef.id, paidAt: new Date().toISOString() })
-    return { outcome: "created", p }
+    return { outcome: "created", p, datePassed, bookedDate }
   })
 
   if (result.outcome === "created") {
-    await sendWhatsAppMessage(result.p.customerPhone, result.p.confirmation)
+    const message = result.datePassed
+      ? `${result.p.confirmation}\n\n\u26A0\uFE0F The date you chose (${displayDate(result.bookedDate)}) has already passed, ` +
+        `so our team will contact you to agree a new date.`
+      : result.p.confirmation
+    await sendWhatsAppMessage(result.p.customerPhone, message)
+  } else if (result.outcome === "unknown" && String(reference).startsWith("WC-")) {
+    await reportUnmatchedPayment(reference, paidKobo, customerPhone)
   } else if (result.outcome === "amount_mismatch") {
     console.error(`Paystack amount mismatch for ${reference}: paid ${paidKobo} kobo, expected ${result.p.amount * 100}`)
     await sendWhatsAppMessage(result.p.customerPhone,
@@ -635,12 +727,67 @@ async function finalizePaystackPayment(reference, paidKobo, channel) {
   return result.outcome
 }
 
+// A bot payment whose booking record is gone (e.g. a link paid long after
+// it was cleaned up). Raises one support ticket so the team can follow up.
+async function reportUnmatchedPayment(reference, paidKobo, customerPhone) {
+  const phone = customerPhone ? `whatsapp:+${String(customerPhone).replace(/\D/g, "")}` : null
+  try {
+    await db.collection("supportTickets").doc(`payment_${reference}`).create({
+      ticketId: `PAY-${reference.slice(-6)}`,
+      customerName: "",
+      customerPhone: phone,
+      category: "Payment without booking",
+      message: `Paystack payment ${reference} of ${naira(Number(paidKobo) / 100)} could not be matched to a booking. Contact the customer to rebook.`,
+      contactTime: "anytime",
+      status: "open",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    })
+  } catch (err) {
+    if (err.code === 6) return // already reported (webhook and return page both arrive)
+    throw err
+  }
+  console.error(`Paystack payment ${reference} has no matching booking; support ticket raised.`)
+  if (phone) {
+    await sendWhatsAppMessage(phone,
+      `We received your payment of ${naira(Number(paidKobo) / 100)} (ref ${reference}), but the booking it was for has expired. ` +
+      `Our team will contact you shortly to set it up. No need to pay again.`)
+  }
+}
+
 async function verifyPaystackTransaction(reference) {
   const res = await axios.get(`${PAYSTACK_API}/transaction/verify/${encodeURIComponent(reference)}`, {
     headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` },
     timeout: 15000,
   })
   return res.data?.data
+}
+
+// ================= HOUSEKEEPING =================
+// Old duplicate-message markers and payment links that were never paid
+// would otherwise pile up in Firestore forever.
+const DAY_MS = 24 * 60 * 60 * 1000
+
+async function deleteOlderThan(collectionName, field, days, keep = () => false) {
+  const cutoff = new Date(Date.now() - days * DAY_MS).toISOString()
+  const snap = await db.collection(collectionName).where(field, "<", cutoff).limit(400).get()
+  const stale = snap.docs.filter((d) => !keep(d.data()))
+  if (!stale.length) return 0
+  const batch = db.batch()
+  stale.forEach((d) => batch.delete(d.ref))
+  await batch.commit()
+  return stale.length
+}
+
+async function cleanUpOldRecords() {
+  try {
+    const messages = await deleteOlderThan("processedMessages", "processedAt", 3)
+    // Paid links are kept: they link a Paystack payment to its booking.
+    const links = await deleteOlderThan("pendingPayments", "createdAt", 30, (p) => p.status === "paid" || p.status === "amount_mismatch")
+    if (messages || links) console.log(`Cleanup: removed ${messages} old message markers, ${links} unpaid payment links`)
+  } catch (err) {
+    console.error("Cleanup failed:", err.message)
+  }
 }
 
 // ================= START SERVER =================
@@ -723,16 +870,27 @@ nextApp.prepare().then(() => {
           : ""
       ).toString().trim().substring(0, 1000)
 
-      // Image — Meta sends media ID, not a URL.
-      // We fetch the URL via the Graph API using the media ID.
-      const hasImage = msgType === "image"
-      const mediaId  = hasImage ? message.image?.id || null : null
+      // Receipt — a photo, or a file such as a PDF bank receipt. Meta sends
+      // a media ID, not a URL; the bytes are fetched via the Graph API.
+      const docMime = String(message.document?.mime_type || "").toLowerCase()
+      const isReceiptDocument = msgType === "document" && (docMime === "application/pdf" || docMime.startsWith("image/"))
+      const hasImage = msgType === "image" || isReceiptDocument
+      const mediaId  = msgType === "image" ? message.image?.id || null
+        : isReceiptDocument ? message.document?.id || null
+        : null
+      // Any other file (Word, audio...) can't be used as a receipt.
+      const unsupportedMedia = !hasImage && ["document", "audio", "video", "sticker"].includes(msgType)
+      const mediaType = isReceiptDocument && docMime === "application/pdf" ? "pdf" : "image"
 
       const messageId = message.id || null
       // `msg` is lowercased for matching commands and menu choices; `rawMsg`
       // keeps what the customer typed for names, addresses and descriptions.
       const phoneNumberId = value?.metadata?.phone_number_id || null
-      return { from: normalizedFrom, msg: text.toLowerCase().substring(0, 500), rawMsg: text, hasImage, mediaId, messageId, phoneNumberId }
+      const displayNumber = value?.metadata?.display_phone_number || null
+      return {
+        from: normalizedFrom, msg: text.toLowerCase().substring(0, 500), rawMsg: text,
+        hasImage, mediaId, mediaType, unsupportedMedia, messageId, phoneNumberId, displayNumber,
+      }
     } catch (e) {
       console.error("extractIncoming error:", e)
       return { from: "", msg: "", hasImage: false, mediaId: null, messageId: null }
@@ -772,13 +930,16 @@ nextApp.prepare().then(() => {
     return Buffer.from(response.data, "binary")
   }
 
-  async function uploadImageToCloudinary(imageBuffer, from) {
+  async function uploadImageToCloudinary(imageBuffer, from, mediaType = "image") {
     return new Promise((resolve, reject) => {
       cloudinary.uploader
         .upload_stream(
           {
             folder: "waste-connect/receipts",
+            // Cloudinary stores PDFs as "image" assets, so the dashboard
+            // can show a preview of the first page.
             resource_type: "image",
+            ...(mediaType === "pdf" ? { format: "pdf" } : {}),
             public_id: `receipt_${from.replace(/whatsapp:\+?/i, "")}_${Date.now()}`,
           },
           (error, result) => (error ? reject(error) : resolve(result.secure_url))
@@ -787,7 +948,12 @@ nextApp.prepare().then(() => {
     })
   }
 
+  // Firestore documents are capped at 1 MB, so only small files fit in the
+  // backup copy (base64 grows the size by a third).
+  const MAX_FALLBACK_BYTES = 700 * 1024
+
   async function uploadImageFallback(imageBuffer, from) {
+    if (imageBuffer.length > MAX_FALLBACK_BYTES) throw new Error("Receipt too large for the backup copy")
     const base64Image = imageBuffer.toString("base64")
     const docId = `receipt_${from.replace(/whatsapp:\+?/i, "")}_${Date.now()}`
     await db.collection("imageFallbacks").doc(docId).set({
@@ -798,12 +964,28 @@ nextApp.prepare().then(() => {
     return `firebase:${docId}`
   }
 
-  async function handleReceiptUpload(mediaId, from) {
-    const buffer = await downloadMetaMedia(mediaId)
+  // Returns the saved receipt's URL, or null if it couldn't be downloaded
+  // or stored (the customer is then asked to send it again).
+  async function handleReceiptUpload(mediaId, from, mediaType) {
+    let buffer
     try {
-      return await uploadImageToCloudinary(buffer, from)
-    } catch {
+      buffer = await downloadMetaMedia(mediaId)
+    } catch (err) {
+      console.error("Receipt download from WhatsApp failed:", err.response?.data || err.message)
+      return null
+    }
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        return await uploadImageToCloudinary(buffer, from, mediaType)
+      } catch (err) {
+        console.error(`Cloudinary upload attempt ${attempt} failed:`, err.message || err)
+      }
+    }
+    try {
       return await uploadImageFallback(buffer, from)
+    } catch (err) {
+      console.error("Receipt backup save failed:", err.message)
+      return null
     }
   }
 
@@ -821,33 +1003,82 @@ nextApp.prepare().then(() => {
   })
 
   // ================= WHATSAPP WEBHOOK =================
-  app.post("/whatsapp", async (req, res) => {
+  // Messages from the same customer are handled one at a time, in order, so
+  // two quick messages can't both act on the same step of the conversation.
+  const senderQueues = new Map()
+  function runInOrder(key, task) {
+    const next = (senderQueues.get(key) || Promise.resolve()).then(task)
+    senderQueues.set(key, next)
+    next.finally(() => { if (senderQueues.get(key) === next) senderQueues.delete(key) })
+  }
+
+  app.post("/whatsapp", (req, res) => {
     // Acknowledge immediately — Flaxxa expects a fast 200 OK
     res.sendStatus(200)
 
-    const { from, msg, rawMsg = "", hasImage, mediaId, messageId, phoneNumberId } = extractIncoming(req)
-    if (!from) {
+    const incoming = extractIncoming(req)
+    if (!incoming.from) {
       console.warn("Webhook received with no sender phone — ignored.", req.body)
       return
     }
+    runInOrder(incoming.from, () =>
+      handleIncoming(incoming).catch((err) => console.error("Webhook handling failed:", err))
+    )
+  })
+
+  // "cancel", "cancel please", "stop", "restart"... but not an address such
+  // as "Ojota bus stop".
+  const CANCEL_RE = /^(please\s+)?(cancel|stop|restart|quit|exit)(\s+(please|it|this|order|booking|request))?[\s.!]*$/
+
+  // Bookings still in progress, newest first. Queried by phone only (no
+  // composite index needed) and filtered by status here.
+  const ACTIVE_STATUSES = {
+    instantPickups: ["pending", "assigned", "confirmed"],
+    pickupRequests: ["pending", "assigned", "confirmed"],
+    upgradeRequests: ["pending"],
+    wasteBagOrders: ["pending", "confirmed"],
+  }
+
+  async function findActiveBookings(from, collections = Object.keys(ACTIVE_STATUSES)) {
+    const snaps = await Promise.all(
+      collections.map((col) => db.collection(col).where("customerPhone", "==", from).get())
+    )
+    return snaps
+      .flatMap((snap, i) => snap.docs.map((d) => ({ collection: collections[i], id: d.id, ref: d.ref, data: d.data() })))
+      .filter((b) => ACTIVE_STATUSES[b.collection].includes(b.data.status))
+      .sort((a, b) => String(b.data.createdAt || "").localeCompare(String(a.data.createdAt || "")))
+  }
+
+  function bookingLabel(b) {
+    const d = b.data
+    if (b.collection === "wasteBagOrders") return "Waste bag order"
+    return d.serviceLabel || d.planLabel || PICKUP_SERVICE_LABELS[d.serviceType] ||
+      WEEKLY_PLAN_LABELS[d.serviceType] || (b.collection === "upgradeRequests" ? "Monthly subscription" : "Pickup")
+  }
+
+  async function handleIncoming({
+    from, msg, rawMsg = "", hasImage, mediaId, mediaType, unsupportedMedia, messageId, phoneNumberId, displayNumber,
+  }) {
+    if (displayNumber) rememberBusinessNumber(displayNumber).catch(() => {})
 
     // DEDUPLICATION — Flaxxa sometimes sends the same webhook twice.
-    // We store the last processed message ID per user and ignore duplicates.
+    // create() fails if the marker exists, so only one copy gets through.
     if (messageId) {
-      const dedupRef = db.collection("processedMessages").doc(messageId)
-      const dedupDoc = await dedupRef.get()
-      if (dedupDoc.exists) {
-        console.log(`Duplicate webhook ignored — messageId: ${messageId}`)
-        return
+      try {
+        await db.collection("processedMessages").doc(messageId).create({ processedAt: new Date().toISOString(), from })
+      } catch (err) {
+        if (err.code === 6) { // ALREADY_EXISTS
+          console.log(`Duplicate webhook ignored — messageId: ${messageId}`)
+          return
+        }
+        throw err
       }
-      // Mark as processed (auto-expire after 10 minutes via TTL or just leave it)
-      await dedupRef.set({ processedAt: new Date().toISOString(), from })
     }
 
     // GLOBAL CANCEL
-    if (msg === "cancel") {
+    if (CANCEL_RE.test(msg)) {
       await db.collection("sessions").doc(from).delete()
-      await sendWhatsAppMessage(from, "Operation cancelled. Type hi to start again.")
+      await sendWhatsAppMessage(from, "Cancelled. Send any message to start again.")
       return
     }
 
@@ -950,7 +1181,7 @@ nextApp.prepare().then(() => {
       await send(
         `Thanks, ${displayName(session.data.name || session.data.businessName)}! Here's your order:\n\n${orderSummary(checkout)}\n\n` +
         `\u{1F3E6} *Pay by bank transfer*\n${BANK_DETAILS}\n\n` +
-        `\u{1F4F8} After paying, send a photo of your payment receipt here.`
+        `\u{1F4F8} After paying, send a photo or PDF of your payment receipt here.`
       )
       session.step = receiptStep
     }
@@ -971,32 +1202,64 @@ nextApp.prepare().then(() => {
       }
     }
 
+    const DATE_HINT = "Reply *today*, *tomorrow* or a date like 30/03/2026."
     const askPickupDate = () => send(
       session.data.serviceType === "scheduled"
-        ? "Which date should we come? (YYYY-MM-DD, e.g. 2026-03-30)"
-        : "Pickup date (YYYY-MM-DD)?"
+        ? `Which date should we come?\n\n${DATE_HINT}`
+        : `When should we pick up?\n\n${DATE_HINT}`
     )
+
+    // Reads a date reply; tells the customer what's wrong and returns null
+    // if it isn't a valid date from today on.
+    const readFutureDate = async () => {
+      const date = parseDateInput(msg)
+      if (!date) {
+        await send(`Sorry, I couldn't read that date. ${DATE_HINT}`)
+        return null
+      }
+      if (date < lagosToday()) {
+        await send(`That date has passed. ${DATE_HINT}`)
+        return null
+      }
+      return date
+    }
+
+    // Bank-transfer fallback: saves the booking once a receipt photo or PDF
+    // arrives. Returns false (staying on the step) if the customer needs to
+    // send it again.
+    const saveReceiptBooking = async () => {
+      if (!hasImage) {
+        await send(unsupportedMedia
+          ? "That file type can't be used as a receipt. Please send a photo or PDF of your payment receipt."
+          : "Please send a photo or PDF of your payment receipt.")
+        return false
+      }
+      const receiptUrl = await handleReceiptUpload(mediaId, from, mediaType)
+      if (!receiptUrl) {
+        await send("Sorry, we couldn't save your receipt. Please send it again.")
+        return false
+      }
+      const checkout = buildCheckout(session.data, from)
+      await db.collection(checkout.collection).add(
+        bookingRecord(checkout, { paymentReceiptUrl: receiptUrl, paymentMethod: "bank_transfer", paymentStatus: "unverified" })
+      )
+      await send(confirmationMessage(checkout, { viaReceipt: true }))
+      return true
+    }
 
     try {
       // ── Active request check (only at conversation start) ────────────────
       if (session.step === "0" || session.step === "0.5") {
-        const [activeInstant, activeMonthly] = await Promise.all([
-          db.collection("instantPickups")
-            .where("customerPhone", "==", from)
-            .where("status", "in", ["pending", "assigned"])
-            .get(),
-          db.collection("pickupRequests")
-            .where("customerPhone", "==", from)
-            .where("status", "in", ["pending", "assigned"])
-            .get(),
-        ])
-
-        if (!activeInstant.empty || !activeMonthly.empty) {
-          const activeDoc = !activeInstant.empty ? activeInstant.docs[0] : activeMonthly.docs[0]
-          const data = activeDoc.data()
+        const [active] = await findActiveBookings(from)
+        if (active) {
+          const d = active.data
+          const when = d.pickupDate ? `\n\u{1F4C5} ${displayDate(d.pickupDate)}${d.timeWindow ? ` \u00B7 ${d.timeWindow}` : ""}`
+            : d.startDate ? `\n\u{1F4C5} Starts ${displayDate(d.startDate)}` : ""
+          await ensureProfile()
           await send(
-            `Active Request Found\n\nService: ${WEEKLY_PLAN_LABELS[data.serviceType] || data.serviceType}\nPickup Date: ${data.pickupDate}\nStatus: ${data.status}\n\n` +
-            `You can still:\n1 - Book another service\n2 - Order Waste Bags\n3 - Speak to Support\n\nReply with a number or type cancel to restart.`
+            `${session.data.name ? `Welcome back, ${displayName(session.data.name)}! \u{1F44B}\n\n` : ""}` +
+            `You have a booking in progress:\n\n*${bookingLabel(active)}*${when}\nStatus: ${d.status}\n\n` +
+            `What would you like to do?\n1 - Book another service\n2 - Order Waste Bags\n3 - Speak to Support\n\nReply with a number.`
           )
           session.step = "active_menu"
           await sessionsRef.set(session)
@@ -1008,12 +1271,9 @@ nextApp.prepare().then(() => {
       switch (session.step) {
 
         // ── ENTRY ──────────────────────────────────────────────────────────
+        // Any first message (hi, good morning, a question...) opens the menu.
         case "0":
-          if (msg === "hi" || msg === "hello") {
-            await sendServiceMenu()
-          } else {
-            await send("To start, type hi.")
-          }
+          await sendServiceMenu()
           break
 
         // Older conversations waiting at the retired "Book Pickup" prompt.
@@ -1107,25 +1367,18 @@ nextApp.prepare().then(() => {
           break
         }
 
-        case "pickup_date":
-          if (!/^\d{4}-\d{2}-\d{2}$/.test(msg) || isNaN(Date.parse(msg))) {
-            await send("Invalid date. Please use YYYY-MM-DD e.g. 2026-03-30.")
-            break
-          }
+        case "pickup_date": {
+          const date = await readFutureDate()
+          if (!date) break
+          session.data.pickupDate = date
           if (session.data.serviceType === "scheduled") {
-            const today = new Date().toISOString().slice(0, 10)
-            if (msg < today) {
-              await send("That date has passed. Please choose today or a future date (YYYY-MM-DD).")
-              break
-            }
-            session.data.pickupDate = msg
             await send("Preferred pickup time?\n\n1 - Morning (8am-12pm)\n2 - Afternoon (12pm-4pm)\n3 - Evening (4pm-7pm)\n\nReply 1, 2, or 3.")
             session.step = "pickup_time"
             break
           }
-          session.data.pickupDate = msg
           await sendPickupPayment()
           break
+        }
 
         case "pickup_time":
           if (!PICKUP_TIME_WINDOWS[msg]) { await send("Please reply 1, 2, or 3."); break }
@@ -1134,16 +1387,7 @@ nextApp.prepare().then(() => {
           break
 
         case "pickup_payment":
-          if (!hasImage) { await send("Please upload an image of your payment receipt."); break }
-          {
-            const receiptUrl = await handleReceiptUpload(mediaId, from)
-            const checkout = buildCheckout(session.data, from)
-            await db.collection(checkout.collection).add(
-              bookingRecord(checkout, { paymentReceiptUrl: receiptUrl, paymentMethod: "bank_transfer" })
-            )
-            await send(confirmationMessage(checkout, { viaReceipt: true }))
-          }
-          session.step = "done"
+          if (await saveReceiptBooking()) session.step = "done"
           break
 
         // ── MONTHLY SUBSCRIPTION FLOW ──────────────────────────────────────
@@ -1192,30 +1436,20 @@ nextApp.prepare().then(() => {
 
         case "upgrade_address":
           session.data.address = rawMsg.substring(0, 300)
-          await send("Preferred start date (YYYY-MM-DD)?")
+          await send(`When should your plan start?\n\n${DATE_HINT}`)
           session.step = "upgrade_date"
           break
 
-        case "upgrade_date":
-          if (!/^\d{4}-\d{2}-\d{2}$/.test(msg) || isNaN(Date.parse(msg))) {
-            await send("Invalid date. Please use YYYY-MM-DD e.g. 2025-08-20.")
-            break
-          }
-          session.data.startDate = msg
+        case "upgrade_date": {
+          const date = await readFutureDate()
+          if (!date) break
+          session.data.startDate = date
           await startCheckout("upgrade_payment")
           break
+        }
 
         case "upgrade_payment":
-          if (!hasImage) { await send("Please upload an image of your payment receipt."); break }
-          {
-            const receiptUrl = await handleReceiptUpload(mediaId, from)
-            const checkout = buildCheckout(session.data, from)
-            await db.collection(checkout.collection).add(
-              bookingRecord(checkout, { paymentReceiptUrl: receiptUrl, paymentMethod: "bank_transfer" })
-            )
-            await send(confirmationMessage(checkout, { viaReceipt: true }))
-          }
-          session.step = "done"
+          if (await saveReceiptBooking()) session.step = "done"
           break
 
         // ── WASTE BAGS FLOW ────────────────────────────────────────────────
@@ -1235,9 +1469,9 @@ nextApp.prepare().then(() => {
 
         case "bags_quantity":
           {
-            const qty = parseInt(msg, 10)
-            if (isNaN(qty) || qty < 1 || qty > 100) {
-              await send("Please enter a valid quantity between 1 and 100.")
+            const qty = Number(msg)
+            if (!/^\d+$/.test(msg) || qty < 1 || qty > 100) {
+              await send("Please reply with the number of packs (1 to 100), e.g. 2.")
               break
             }
             session.data.bagQuantity = qty
@@ -1253,16 +1487,7 @@ nextApp.prepare().then(() => {
           break
 
         case "bags_payment":
-          if (!hasImage) { await send("Please upload your payment receipt image."); break }
-          {
-            const receiptUrl = await handleReceiptUpload(mediaId, from)
-            const checkout = buildCheckout(session.data, from)
-            await db.collection(checkout.collection).add(
-              bookingRecord(checkout, { paymentReceiptUrl: receiptUrl, paymentMethod: "bank_transfer" })
-            )
-            await send(confirmationMessage(checkout, { viaReceipt: true }))
-          }
-          session.step = "done"
+          if (await saveReceiptBooking()) session.step = "done"
           break
 
         // ── SUPPORT FLOW ───────────────────────────────────────────────────
@@ -1282,10 +1507,58 @@ nextApp.prepare().then(() => {
             }
             if (!categories[msg]) { await send("Please reply 1 to 5."); break }
             session.data.supportCategory = categories[msg]
+            if (msg === "4") {
+              const [pickup] = await findActiveBookings(from, ["instantPickups", "pickupRequests"])
+              if (!pickup) {
+                await send("You don't have an upcoming pickup to change. Send any message to see the menu and book one.")
+                session.step = "done"
+                break
+              }
+              session.data.changePickup = { collection: pickup.collection, id: pickup.id, oldDate: pickup.data.pickupDate ?? null }
+              await send(
+                `Your pickup: *${bookingLabel(pickup)}*` +
+                `${pickup.data.pickupDate ? ` on ${displayDate(pickup.data.pickupDate)}` : ""}\n\n` +
+                `What new date would you like? ${DATE_HINT}`
+              )
+              session.step = "change_date"
+              break
+            }
             await send("Please describe your issue in detail.")
             session.step = "support_describe"
           }
           break
+
+        case "change_date": {
+          const date = await readFutureDate()
+          if (!date) break
+          const { collection, id, oldDate } = session.data.changePickup
+          const ref = db.collection(collection).doc(id)
+          const snap = await ref.get()
+          if (!snap.exists || snap.data().customerPhone !== from || !ACTIVE_STATUSES[collection].includes(snap.data().status)) {
+            await send("That pickup can no longer be changed. Please choose Speak to Support and describe what you need.")
+            session.step = "done"
+            break
+          }
+          const now = new Date().toISOString()
+          await ref.update({ pickupDate: date, previousPickupDate: oldDate, dateChangedAt: now, needsReschedule: false, updatedAt: now })
+          // Logged as a ticket so the team sees the change.
+          await db.collection("supportTickets").add({
+            ticketId: `TKT-${Date.now().toString().slice(-6)}`,
+            customerName: session.data.name || session.data.businessName || "",
+            customerPhone: from,
+            category: "Change Pickup Date",
+            message: `Pickup date changed by the customer from ${oldDate ? displayDate(oldDate) : "(none)"} to ${displayDate(date)}.`,
+            contactTime: "anytime",
+            relatedPickupId: id,
+            relatedCollection: collection,
+            status: "open",
+            createdAt: now,
+            updatedAt: now,
+          })
+          await send(`\u2705 *Pickup date changed*\n\nYour pickup is now on ${displayDate(date)}. We'll message you when a collector is assigned.`)
+          session.step = "done"
+          break
+        }
 
         case "support_describe":
           session.data.supportMessage = rawMsg.substring(0, 1000)
@@ -1299,7 +1572,7 @@ nextApp.prepare().then(() => {
             const ticketId = `TKT-${Date.now().toString().slice(-6)}`
             await db.collection("supportTickets").add({
               ticketId,
-              customerName: session.data.name,
+              customerName: session.data.name || session.data.businessName || "",
               customerPhone: from,
               category: session.data.supportCategory,
               message: session.data.supportMessage,
@@ -1317,8 +1590,8 @@ nextApp.prepare().then(() => {
 
         // ── DEFAULT ────────────────────────────────────────────────────────
         default:
-          await send("To start, type hi.")
           session = { step: "0", data: {} }
+          await sendServiceMenu()
       }
 
       if (session.step === "done") {
@@ -1331,14 +1604,35 @@ nextApp.prepare().then(() => {
 
     } catch (error) {
       console.error("Unexpected error:", error)
-      try { await sendWhatsAppMessage(from, "An unexpected error occurred. Please try again.") } catch (_) {}
+      try { await sendWhatsAppMessage(from, "Sorry, something went wrong on our side. Please send your last message again.") } catch (_) {}
     }
-  })
+  }
 
   // ================= ADMIN ACCOUNTS =================
   // Dashboard logins use Firebase Auth. Usernames map to a synthetic email
   // (never emailed). Roles live in admins/{uid}: one "main" admin, created
   // once via /setup, who manages any number of "sub" admins.
+  // Sign-in itself goes through Firebase Auth, which already blocks repeated
+  // wrong passwords ("too many attempts"). This limits the account-setup and
+  // sub-admin endpoints: 30 requests per 15 minutes per IP address.
+  const attempts = new Map()
+  function rateLimit(req, res, next) {
+    const ip = (req.headers["x-forwarded-for"] || req.ip || "").split(",")[0].trim()
+    const now = Date.now()
+    const recent = (attempts.get(ip) || []).filter((t) => now - t < 15 * 60 * 1000)
+    if (recent.length >= 30) {
+      return res.status(429).json({ error: "Too many attempts. Please wait a few minutes and try again." })
+    }
+    recent.push(now)
+    attempts.set(ip, recent)
+    next()
+  }
+  setInterval(() => {
+    const cutoff = Date.now() - 15 * 60 * 1000
+    for (const [ip, times] of attempts) if (times.every((t) => t < cutoff)) attempts.delete(ip)
+  }, 15 * 60 * 1000).unref()
+  app.use(["/api/admin-auth/setup", "/api/sub-admins"], rateLimit)
+
   const ADMIN_EMAIL_DOMAIN = "admins.wastecore.local"
   const USERNAME_RE = /^[a-z0-9._-]{3,30}$/
   const mainAdminRef = () => db.collection("config").doc("mainAdmin")
@@ -1511,7 +1805,7 @@ nextApp.prepare().then(() => {
     const { event, data } = req.body || {}
     if (event !== "charge.success" || data?.status !== "success" || data?.currency !== "NGN") return
     try {
-      const outcome = await finalizePaystackPayment(data.reference, data.amount, data.channel)
+      const outcome = await finalizePaystackPayment(data.reference, data.amount, data.channel, data.metadata?.customerPhone)
       console.log(`Paystack ${data.reference}: ${outcome}`)
     } catch (err) {
       console.error("Paystack webhook processing failed:", err)
@@ -1527,7 +1821,7 @@ nextApp.prepare().then(() => {
       try {
         const tx = await verifyPaystackTransaction(reference)
         if (tx?.status === "success" && tx.currency === "NGN") {
-          const outcome = await finalizePaystackPayment(reference, tx.amount, tx.channel)
+          const outcome = await finalizePaystackPayment(reference, tx.amount, tx.channel, tx.metadata?.customerPhone)
           paid = outcome === "created" || outcome === "already_paid"
         }
       } catch (err) {
@@ -1558,7 +1852,7 @@ nextApp.prepare().then(() => {
   <div class="icon">${icon}</div>
   <h1>${title}</h1>
   <p>${body}</p>
-  <a class="btn" href="https://wa.me/${WHATSAPP_BUSINESS_NUMBER}">Back to WhatsApp</a>
+  <a class="btn" href="https://wa.me/${businessNumber()}">Back to WhatsApp</a>
 </main></body></html>`)
   })
 
@@ -1571,5 +1865,8 @@ nextApp.prepare().then(() => {
   app.listen(port, () => {
     console.log(`Server running on http://localhost:${port}`)
     setupStatusListeners()
+    loadBusinessNumber()
+    cleanUpOldRecords()
+    setInterval(cleanUpOldRecords, 6 * 60 * 60 * 1000).unref()
   })
 })

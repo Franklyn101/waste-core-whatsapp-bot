@@ -7,16 +7,19 @@ import { Button } from "@/components/ui/button"
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger,
 } from "@/components/ui/dialog"
-import { Eye, Download, User, Calendar, Package } from "lucide-react"
+import { Eye, Download, User, Calendar, Package, BadgeCheck, FileText } from "lucide-react"
 import { AdvancedFilters, type FilterOptions } from "@/components/advanced-filters"
 import { useFilteredRequests } from "@/hooks/use-filtered-data"
 import { servicePrice } from "@/lib/subscriptions"
-import { collection, getDocs } from "firebase/firestore"
+import { collection, doc, getDocs, updateDoc } from "firebase/firestore"
 import { db } from "@/lib/firebase"
 
 // Unified receipt shape pulled from all collections
 interface ReceiptRecord {
   id: string
+  collection: string
+  docId: string
+  verified: boolean
   customerName: string
   customerPhone: string
   paymentReceiptUrl: string
@@ -85,6 +88,9 @@ async function fetchAllReceipts(): Promise<ReceiptRecord[]> {
         const createdAt = parseDate(data.createdAt)
         results.push({
           id:                `${col}_${d.id}`,
+          collection:        col,
+          docId:             d.id,
+          verified:          data.paymentStatus === "paid",
           customerName:      data.customerName ?? "",
           customerPhone:     data.customerPhone ?? "",
           paymentReceiptUrl: data.paymentReceiptUrl,
@@ -102,6 +108,46 @@ async function fetchAllReceipts(): Promise<ReceiptRecord[]> {
   )
 
   return results.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+}
+
+// Receipts kept in Firestore because the Cloudinary upload failed.
+const isBackupCopy = (url: string) => url.startsWith("firebase:")
+const isPdf = (url: string) => /\.pdf($|\?)/i.test(url)
+
+// Cloudinary renders the first page of a PDF as an image.
+function previewUrl(url: string): string {
+  if (isPdf(url)) return url.replace("/upload/", "/upload/pg_1,f_jpg,q_auto/").replace(/\.pdf($|\?)/i, ".jpg$1")
+  return url.replace("/upload/", "/upload/f_auto,q_auto/")
+}
+
+function ReceiptPreview({ receipt, fit }: { receipt: ReceiptRecord; fit: "cover" | "contain" }) {
+  if (isBackupCopy(receipt.paymentReceiptUrl)) {
+    return (
+      <div className="flex h-full w-full flex-col items-center justify-center gap-1 p-4 text-center text-xs text-muted-foreground">
+        <FileText className="h-6 w-6" />
+        Saved as a backup copy in Firestore
+        <span className="font-mono">imageFallbacks/{receipt.paymentReceiptUrl.slice("firebase:".length)}</span>
+      </div>
+    )
+  }
+  return (
+    <img
+      src={previewUrl(receipt.paymentReceiptUrl)}
+      alt={`Receipt for ${receipt.customerName}`}
+      className={`w-full h-full ${fit === "cover" ? "object-cover" : "object-contain"}`}
+      onError={(e) => {
+        e.currentTarget.src = "/payment-receipt-not-available.png"
+      }}
+    />
+  )
+}
+
+function VerifiedBadge({ verified }: { verified: boolean }) {
+  return verified ? (
+    <Badge className="bg-green-100 text-green-800"><BadgeCheck className="mr-1 h-3 w-3" /> Verified</Badge>
+  ) : (
+    <Badge className="bg-amber-100 text-amber-800">Not verified</Badge>
+  )
 }
 
 const SERVICE_BADGE: Record<string, string> = {
@@ -138,6 +184,27 @@ export function PaymentReceiptsGallery({ searchQuery = "" }: PaymentReceiptsGall
   }, [])
 
   const filteredReceipts = useFilteredRequests(allReceipts as any, filters) as unknown as ReceiptRecord[]
+  const [verifying, setVerifying] = useState<string | null>(null)
+
+  // Marks the money as received after checking the receipt against the
+  // bank account. The bot then treats the booking (and its invoice) as paid.
+  const markVerified = async (receipt: ReceiptRecord) => {
+    if (!confirm(`Confirm you have received NGN ${receipt.amount.toLocaleString()} from ${receipt.customerName || receipt.customerPhone}?`)) return
+    setVerifying(receipt.id)
+    try {
+      await updateDoc(doc(db, receipt.collection, receipt.docId), {
+        paymentStatus: "paid",
+        receiptVerifiedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      })
+      setAllReceipts((list) => list.map((r) => (r.id === receipt.id ? { ...r, verified: true } : r)))
+    } catch (err) {
+      console.error("Receipt verification failed:", err)
+      alert("Could not mark the receipt as verified. Please try again.")
+    } finally {
+      setVerifying(null)
+    }
+  }
 
   const availableStatuses     = Array.from(new Set(allReceipts.map((r) => r.status)))
   const availableServiceTypes = Array.from(new Set(allReceipts.map((r) => r.serviceLabel)))
@@ -190,14 +257,10 @@ export function PaymentReceiptsGallery({ searchQuery = "" }: PaymentReceiptsGall
 
                 {/* Image card */}
                 <div className="relative aspect-square bg-muted rounded-lg overflow-hidden border">
-                  <img
-                    src={receipt.paymentReceiptUrl.replace("/upload/", "/upload/f_auto,q_auto/")}
-                    alt={`Receipt for ${receipt.customerName}`}
-                    className="w-full h-full object-cover"
-                    onError={(e) => {
-                      e.currentTarget.src = "/payment-receipt-not-available.png"
-                    }}
-                  />
+                  <ReceiptPreview receipt={receipt} fit="cover" />
+                  {isPdf(receipt.paymentReceiptUrl) && (
+                    <span className="absolute left-2 top-2 rounded bg-black/70 px-1.5 py-0.5 text-xs font-medium text-white">PDF</span>
+                  )}
 
                   {/* Hover overlay */}
                   <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2">
@@ -213,11 +276,7 @@ export function PaymentReceiptsGallery({ searchQuery = "" }: PaymentReceiptsGall
                         </DialogHeader>
                         <div className="space-y-4">
                           <div className="aspect-video bg-muted rounded-lg overflow-hidden">
-                            <img
-                              src={receipt.paymentReceiptUrl.replace("/upload/", "/upload/f_auto,q_auto/")}
-                              alt={`Receipt for ${receipt.customerName}`}
-                              className="w-full h-full object-contain"
-                            />
+                            <ReceiptPreview receipt={receipt} fit="contain" />
                           </div>
                           <div className="grid grid-cols-2 gap-3 text-sm">
                             <div>
@@ -239,7 +298,11 @@ export function PaymentReceiptsGallery({ searchQuery = "" }: PaymentReceiptsGall
                               <p className="font-medium">{receipt.serviceDetail || "—"}</p>
                             </div>
                             <div>
-                              <p className="text-muted-foreground text-xs mb-0.5">Amount Paid</p>
+                              <p className="text-muted-foreground text-xs mb-0.5">Payment</p>
+                              <VerifiedBadge verified={receipt.verified} />
+                            </div>
+                            <div>
+                              <p className="text-muted-foreground text-xs mb-0.5">Amount</p>
                               <p className="font-semibold text-green-700">
                                 NGN {receipt.amount.toLocaleString()}
                               </p>
@@ -261,11 +324,13 @@ export function PaymentReceiptsGallery({ searchQuery = "" }: PaymentReceiptsGall
                       </DialogContent>
                     </Dialog>
 
-                    <Button size="sm" variant="secondary" asChild>
-                      <a href={receipt.paymentReceiptUrl} download target="_blank" rel="noopener noreferrer">
-                        <Download className="w-4 h-4 mr-1" /> Download
-                      </a>
-                    </Button>
+                    {!isBackupCopy(receipt.paymentReceiptUrl) && (
+                      <Button size="sm" variant="secondary" asChild>
+                        <a href={receipt.paymentReceiptUrl} download target="_blank" rel="noopener noreferrer">
+                          <Download className="w-4 h-4 mr-1" /> {isPdf(receipt.paymentReceiptUrl) ? "Open PDF" : "Download"}
+                        </a>
+                      </Button>
+                    )}
                   </div>
                 </div>
 
@@ -298,6 +363,16 @@ export function PaymentReceiptsGallery({ searchQuery = "" }: PaymentReceiptsGall
                     <span className="font-semibold text-green-700 text-sm">
                       NGN {receipt.amount.toLocaleString()}
                     </span>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-2 pt-1">
+                    <VerifiedBadge verified={receipt.verified} />
+                    {!receipt.verified && (
+                      <Button size="sm" variant="outline" disabled={verifying === receipt.id} onClick={() => markVerified(receipt)}>
+                        <BadgeCheck className="w-4 h-4 mr-1" />
+                        {verifying === receipt.id ? "Saving..." : "Mark as verified"}
+                      </Button>
+                    )}
                   </div>
                 </div>
 

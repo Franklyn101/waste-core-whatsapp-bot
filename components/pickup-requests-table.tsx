@@ -237,6 +237,12 @@ export function PickupRequestsTable({ searchQuery = "" }: PickupRequestsTablePro
                         {(request as any).timeWindow && (
                           <div className="text-xs text-muted-foreground">{(request as any).timeWindow}</div>
                         )}
+                        {(request as any).needsReschedule && (
+                          <div className="mt-0.5 inline-block rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-800"
+                            title="Paid after this date had passed. Contact the customer to agree a new date.">
+                            Needs new date
+                          </div>
+                        )}
                       </div>
                     </div>
                   </TableCell>
@@ -269,8 +275,8 @@ export function PickupRequestsTable({ searchQuery = "" }: PickupRequestsTablePro
                         </Button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end">
-                        <DropdownMenuItem onClick={() => handleStatusUpdate(request.id, "confirmed")}>
-                          Mark as Confirmed
+                        <DropdownMenuItem onClick={() => handleStatusUpdate(request.id, "assigned")}>
+                          Mark as Assigned
                         </DropdownMenuItem>
                         <DropdownMenuItem onClick={() => handleStatusUpdate(request.id, "completed")}>
                           Mark as Completed

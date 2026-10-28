@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { collection, onSnapshot, getDocs } from "firebase/firestore"
+import { collection, onSnapshot } from "firebase/firestore"
 import { db } from "@/lib/firebase"
 import { Badge } from "@/components/ui/badge"
 import { PaystackPaidBadge } from "@/components/paystack-paid-badge"
@@ -47,7 +47,7 @@ export function UpgradeRequestsTable({ searchQuery = "" }: UpgradeRequestsTableP
   const [requests, setRequests] = useState<UpgradeRequest[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [isConnected, setIsConnected] = useState(true)
-  const [debugInfo, setDebugInfo] = useState<string>("Initializing...")
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [filters, setFilters] = useState<FilterOptions>({
     status: [],
     wasteTypes: [],
@@ -61,39 +61,13 @@ export function UpgradeRequestsTable({ searchQuery = "" }: UpgradeRequestsTableP
 
   useEffect(() => {
     setIsLoading(true)
-    setDebugInfo("Starting Firestore connection...")
-
-    // DIRECT RAW QUERY — bypasses FirebaseService entirely
     const q = collection(db, "upgradeRequests")
 
-    // Test 1: getDocs one-time fetch
-    getDocs(q)
-      .then((snap) => {
-        setDebugInfo(
-          `getDocs: ${snap.empty ? "EMPTY (0 docs)" : `${snap.docs.length} doc(s) found`} | ` +
-          `metadata: fromCache=${snap.metadata.fromCache}`
-        )
-        if (!snap.empty) {
-          console.log("RAW upgradeRequests docs:", snap.docs.map(d => ({ id: d.id, ...d.data() })))
-        }
-      })
-      .catch((err) => {
-        setDebugInfo(`getDocs ERROR: ${err.code} — ${err.message}`)
-      })
-
-    // Test 2: onSnapshot realtime
     const unsub = onSnapshot(
       q,
       (snapshot) => {
-        console.log("onSnapshot fired, docs:", snapshot.docs.length)
-        if (snapshot.empty) {
-          setDebugInfo((prev) => prev + " | onSnapshot: EMPTY")
-          setIsLoading(false)
-          return
-        }
-
-        const raw = snapshot.docs.map((d) => ({ id: d.id, ...d.data() } as any))
-        console.log("Raw upgrade docs:", raw)
+        setLoadError(null)
+        const raw = snapshot.docs.map((d) => ({ ...d.data(), id: d.id } as any))
 
         const normalized: UpgradeRequest[] = raw.map((data: any) => {
           let plan = data.plan ?? ""
@@ -118,12 +92,11 @@ export function UpgradeRequestsTable({ searchQuery = "" }: UpgradeRequestsTableP
         })
 
         setRequests(normalized.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()).slice(0, 50))
-        setDebugInfo(`onSnapshot: ${snapshot.docs.length} doc(s) loaded ✓`)
         setIsLoading(false)
       },
       (err) => {
-        console.error("onSnapshot error:", err)
-        setDebugInfo(`onSnapshot ERROR: ${err.code} — ${err.message}`)
+        console.error("Plan requests failed to load:", err)
+        setLoadError("Could not load plan requests. Check your connection and refresh the page.")
         setIsLoading(false)
       }
     )
@@ -166,10 +139,6 @@ export function UpgradeRequestsTable({ searchQuery = "" }: UpgradeRequestsTableP
   if (isLoading) {
     return (
       <div className="space-y-4">
-        {/* Debug banner */}
-        <div className="bg-yellow-50 border border-yellow-200 rounded p-3 text-xs font-mono text-yellow-800">
-          🔍 Debug: {debugInfo}
-        </div>
         <Card>
           <CardHeader><CardTitle>Upgrade Requests</CardTitle></CardHeader>
           <CardContent>
@@ -187,14 +156,9 @@ export function UpgradeRequestsTable({ searchQuery = "" }: UpgradeRequestsTableP
   return (
     <div className="space-y-6">
 
-      {/* Debug banner — shows what Firestore returned */}
-      <div className={`border rounded p-3 text-xs font-mono ${
-        debugInfo.includes("ERROR") ? "bg-red-50 border-red-200 text-red-800" :
-        debugInfo.includes("EMPTY") ? "bg-orange-50 border-orange-200 text-orange-800" :
-        "bg-green-50 border-green-200 text-green-800"
-      }`}>
-        🔍 {debugInfo}
-      </div>
+      {loadError && (
+        <div className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-800">{loadError}</div>
+      )}
 
       <AdvancedFilters
         filters={filters}
