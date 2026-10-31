@@ -230,7 +230,9 @@ async function sendWhatsAppMessage(to, message) {
  * Used for outbound notifications (driver assigned, pickup complete)
  * where the 24-hour free-form window may have expired.
  *
- * SETUP REQUIRED — create two approved templates in your Flaxxa dashboard:
+ * SETUP REQUIRED — create these approved templates (category Utility) in
+ * WhatsApp Manager > Message templates (or in Flaxxa). notifyCustomer()
+ * sends them through Meta's Cloud API first and Flaxxa second:
  *
  *   1. name: "driver_assigned"   language: en_US
  *      body: "Good news! {{1}} has been assigned to your pickup on {{2}}."
@@ -275,11 +277,48 @@ const TEMPLATE_COMPLETED = process.env.WAPI_TEMPLATE_COMPLETED || "pickup_comple
 const templateSent = (data) =>
   Boolean(data) && !data.error && data.status !== false && data.status !== "error" && data.success !== false
 
-// Sends an approved template; if that fails (e.g. the template is missing
-// in Flaxxa) falls back to a plain message, which still reaches customers
-// who messaged the bot in the last 24 hours.
+// Sends an approved template straight through Meta's Cloud API (the same
+// token as the Pay button), so it works even if Flaxxa blocks template
+// sending. Templates are created in WhatsApp Manager > Message templates.
+// Tries "English (US)" then "English", whichever the template was made in.
+async function sendMetaTemplate(to, templateName, params) {
+  const numberId = whatsAppNumberId()
+  const token = process.env.WHATSAPP_ACCESS_TOKEN
+  const phone = normalizePhone(to).replace(/\D/g, "")
+  if (!numberId || !token || !phone) return false
+  for (const code of ["en_US", "en"]) {
+    try {
+      const res = await axios.post(
+        `https://graph.facebook.com/v19.0/${numberId}/messages`,
+        {
+          messaging_product: "whatsapp",
+          to: phone,
+          type: "template",
+          template: {
+            name: templateName,
+            language: { code },
+            components: [{ type: "body", parameters: params.map((text) => ({ type: "text", text: String(text ?? "") })) }],
+          },
+        },
+        { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, timeout: 15000 }
+      )
+      if (res.data?.messages?.[0]?.id) {
+        console.log(`Template "${templateName}" (${code}) sent to ${phone} via Meta`)
+        return true
+      }
+    } catch (err) {
+      console.error(`Meta template "${templateName}" (${code}) failed:`, err.response?.data?.error?.message || err.message)
+    }
+  }
+  return false
+}
+
+// Sends an approved template (through Meta, then Flaxxa); if neither works
+// (e.g. the template isn't approved yet) falls back to a plain message,
+// which still reaches customers who messaged the bot in the last 24 hours.
 // Returns "template", "text" (sent as a plain message) or "failed".
 async function notifyCustomer(phone, templateName, params, fallbackText) {
+  if (await sendMetaTemplate(phone, templateName, params)) return "template"
   const data = await sendWhatsAppTemplate(phone, templateName, "en_US", [
     { type: "body", parameters: params.map((text) => ({ type: "text", text: String(text ?? "") })) },
   ])
@@ -382,7 +421,7 @@ function setupStatusListeners() {
 // the dashboard shows. "Send again" clears it to resend.
 //
 // Customers added by hand have usually never messaged the bot, so this
-// needs an approved template in Flaxxa (WAPI_TEMPLATE_SUBSCRIPTION):
+// needs an approved template (WAPI_TEMPLATE_SUBSCRIPTION):
 //   name: "subscription_confirmed"   language: en_US   category: Utility
 //   body: "Hello {{1}}, your WasteCore {{2}} subscription is now active.
 //          Pickups: {{3}}, starting {{4}}. Reply HI anytime to book or get help."
@@ -571,7 +610,7 @@ function aboutMedia() {
  * token and number as the Pay button). Returns false if it couldn't be sent.
  */
 async function sendWhatsAppMedia(to, { type, url, caption, phoneNumberId }) {
-  const numberId = process.env.WHATSAPP_PHONE_NUMBER_ID || phoneNumberId
+  const numberId = whatsAppNumberId(phoneNumberId)
   const token = process.env.WHATSAPP_ACCESS_TOKEN
   const phone = normalizePhone(to).replace(/\D/g, "")
   if (!numberId || !token || !phone) return false
@@ -603,7 +642,7 @@ async function sendWhatsAppMedia(to, { type, url, caption, phoneNumberId }) {
  * it) so the caller can fall back to a plain text message with the link.
  */
 async function sendWhatsAppUrlButton(to, { body, buttonText, url, footer, phoneNumberId }) {
-  const numberId = process.env.WHATSAPP_PHONE_NUMBER_ID || phoneNumberId
+  const numberId = whatsAppNumberId(phoneNumberId)
   const token = process.env.WHATSAPP_ACCESS_TOKEN
   const phone = normalizePhone(to).replace(/\D/g, "")
   if (!numberId || !token || !phone) return false
@@ -800,6 +839,13 @@ const PAYSTACK_EMAIL_DOMAIN = process.env.PAYSTACK_CUSTOMER_EMAIL_DOMAIN || "cus
 // message, learnt from incoming webhooks and saved in config/whatsapp.
 const DEFAULT_BUSINESS_NUMBER = "2348117501757"
 let learnedBusinessNumber = null
+// Meta's ID for the bot's number, needed to send through the Cloud API when
+// there's no incoming message to take it from (e.g. status updates).
+let learnedPhoneNumberId = null
+
+function whatsAppNumberId(fromWebhook) {
+  return process.env.WHATSAPP_PHONE_NUMBER_ID || fromWebhook || learnedPhoneNumberId || null
+}
 
 function businessNumber() {
   return (process.env.WHATSAPP_BUSINESS_NUMBER || learnedBusinessNumber || DEFAULT_BUSINESS_NUMBER).replace(/\D/g, "")
@@ -809,16 +855,23 @@ async function loadBusinessNumber() {
   try {
     const snap = await db.collection("config").doc("whatsapp").get()
     if (snap.exists && snap.data().displayNumber) learnedBusinessNumber = snap.data().displayNumber
+    if (snap.exists && snap.data().phoneNumberId) learnedPhoneNumberId = snap.data().phoneNumberId
   } catch (err) {
     console.error("Could not load the saved WhatsApp number:", err.message)
   }
 }
 
-async function rememberBusinessNumber(displayNumber) {
+async function rememberBusinessNumber(displayNumber, phoneNumberId) {
   const digits = String(displayNumber || "").replace(/\D/g, "")
-  if (!digits || digits === learnedBusinessNumber) return
-  learnedBusinessNumber = digits
-  await db.collection("config").doc("whatsapp").set({ displayNumber: digits, updatedAt: new Date().toISOString() }, { merge: true })
+  const numberId = phoneNumberId ? String(phoneNumberId) : null
+  if ((!digits || digits === learnedBusinessNumber) && (!numberId || numberId === learnedPhoneNumberId)) return
+  if (digits) learnedBusinessNumber = digits
+  if (numberId) learnedPhoneNumberId = numberId
+  await db.collection("config").doc("whatsapp").set({
+    ...(digits ? { displayNumber: digits } : {}),
+    ...(numberId ? { phoneNumberId: numberId } : {}),
+    updatedAt: new Date().toISOString(),
+  }, { merge: true })
 }
 
 const paystackEnabled = () => Boolean(PAYSTACK_SECRET_KEY)
@@ -1249,7 +1302,7 @@ nextApp.prepare().then(() => {
   async function handleIncoming({
     from, msg, rawMsg = "", hasImage, mediaId, mediaType, unsupportedMedia, messageId, phoneNumberId, displayNumber,
   }) {
-    if (displayNumber) rememberBusinessNumber(displayNumber).catch(() => {})
+    if (displayNumber || phoneNumberId) rememberBusinessNumber(displayNumber, phoneNumberId).catch(() => {})
 
     // DEDUPLICATION — Flaxxa sometimes sends the same webhook twice.
     // create() fails if the marker exists, so only one copy gets through.
