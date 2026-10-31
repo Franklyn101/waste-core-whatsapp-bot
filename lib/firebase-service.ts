@@ -184,6 +184,7 @@ function normalizeSubscriber(data: any, id: string): SubscriptionRow {
     status: data.status ?? "active",
     notes: data.notes ?? "",
     linkedRequestId: data.linkedRequestId ?? null,
+    whatsAppConfirmation: data.whatsAppConfirmation ?? null,
     createdAt: parseDate(data.createdAt),
   }
 }
@@ -569,12 +570,30 @@ export class FirebaseService {
     return () => unsubs.forEach((u) => u())
   }
 
-  static async createSubscriber(input: SubscriberInput): Promise<boolean> {
+  // sendWhatsApp asks the bot to message the customer a confirmation.
+  static async createSubscriber(input: SubscriberInput, sendWhatsApp = false): Promise<boolean> {
     try {
       const now = new Date().toISOString()
-      await addDoc(collection(db, "subscribers"), { ...input, createdAt: now, updatedAt: now })
+      await addDoc(collection(db, "subscribers"), {
+        ...input,
+        ...(sendWhatsApp ? { sendWhatsAppConfirmation: true } : {}),
+        createdAt: now,
+        updatedAt: now,
+      })
       return true
     } catch (err) { console.error("subscriber create failed", err); return false }
+  }
+
+  // Clearing the last outcome makes the bot send the confirmation again.
+  static async resendSubscriberWhatsApp(id: string): Promise<boolean> {
+    try {
+      await updateDoc(doc(db, "subscribers", id), {
+        sendWhatsAppConfirmation: true,
+        whatsAppConfirmation: null,
+        updatedAt: new Date().toISOString(),
+      })
+      return true
+    } catch (err) { console.error("subscriber resend failed", err); return false }
   }
 
   static async updateSubscriber(id: string, input: SubscriberInput): Promise<boolean> {

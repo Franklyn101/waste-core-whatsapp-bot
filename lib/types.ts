@@ -89,5 +89,8 @@ export interface SubscriptionRow extends SubscriberInput {
   kind: "business" | "household" | "weekly"
   // Raw status from the WhatsApp booking (pending, assigned, ...).
   requestStatus?: string
+  // Outcome of the WhatsApp confirmation the bot sends to a subscriber added
+  // on the dashboard: sending, template, text, failed or invalid_phone.
+  whatsAppConfirmation?: { status: string; at?: string } | null
   createdAt: Date
 }
