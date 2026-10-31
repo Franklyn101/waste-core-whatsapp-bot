@@ -277,6 +277,9 @@ const TEMPLATE_COMPLETED = process.env.WAPI_TEMPLATE_COMPLETED || "pickup_comple
 const templateSent = (data) =>
   Boolean(data) && !data.error && data.status !== false && data.status !== "error" && data.success !== false
 
+// Template values can't contain line breaks, tabs or long runs of spaces.
+const templateParam = (text) => String(text ?? "").replace(/\s+/g, " ").trim().slice(0, 1000) || "-"
+
 // Sends an approved template straight through Meta's Cloud API (the same
 // token as the Pay button), so it works even if Flaxxa blocks template
 // sending. Templates are created in WhatsApp Manager > Message templates.
@@ -297,7 +300,7 @@ async function sendMetaTemplate(to, templateName, params) {
           template: {
             name: templateName,
             language: { code },
-            components: [{ type: "body", parameters: params.map((text) => ({ type: "text", text: String(text ?? "") })) }],
+            components: [{ type: "body", parameters: params.map((text) => ({ type: "text", text: templateParam(text) })) }],
           },
         },
         { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, timeout: 15000 }
@@ -320,7 +323,7 @@ async function sendMetaTemplate(to, templateName, params) {
 async function notifyCustomer(phone, templateName, params, fallbackText) {
   if (await sendMetaTemplate(phone, templateName, params)) return "template"
   const data = await sendWhatsAppTemplate(phone, templateName, "en_US", [
-    { type: "body", parameters: params.map((text) => ({ type: "text", text: String(text ?? "") })) },
+    { type: "body", parameters: params.map((text) => ({ type: "text", text: templateParam(text) })) },
   ])
   if (templateSent(data)) return "template"
   console.warn(`Template "${templateName}" not sent to ${phone}; sending a plain message instead.`)
@@ -338,6 +341,11 @@ function setupStatusListeners() {
         snapshot.docChanges().forEach(async (change) => {
          try {
           const data = change.doc.data()
+
+          // A collector was (re)assigned on the dashboard: message them.
+          if (change.type !== "removed" && COLLECTOR_COLLECTIONS.includes(collectionName)) {
+            await notifyCollectorIfAssigned(collectionName, change.doc)
+          }
 
           // Record the current status on existing/new docs without notifying,
           // so later non-status edits don't look like a status change.
@@ -379,11 +387,13 @@ function setupStatusListeners() {
 
             if (data.status === "completed") {
               await notifyCustomer(
-                data.customerPhone,
+                toWhatsAppId(data.customerPhone) || data.customerPhone,
                 TEMPLATE_COMPLETED,
                 [date || "today"],
                 `\u2705 *Pickup completed*\n\nYour pickup${date ? ` on ${date}` : ""} has been completed. Thank you for choosing WasteCore! \u267B\uFE0F`
               )
+              // Subscription visits are covered by the monthly plan: no invoice.
+              if (collectionName === "subscriptionVisits") return
               const verified = paymentVerified(data)
               await db.collection("invoices").add({
                 customerPhone: data.customerPhone,
@@ -411,7 +421,198 @@ function setupStatusListeners() {
   handleChanges("upgradeRequests")
   handleChanges("wasteBagOrders")
   handleChanges("supportTickets")
+  handleChanges("subscriptionVisits")
   setupSubscriberWelcome()
+  setupCollectorSummaries()
+}
+
+// ================= COLLECTORS =================
+// Pickups are assigned per job on the dashboard (instant, scheduled, and
+// each day's subscription visit), so a collector never owns a customer.
+// The bot messages the collector when a job is assigned to them, sends a
+// morning summary of the day's jobs, and answers "JOBS" with their list.
+//
+// Collectors have often not messaged the bot, so these need approved
+// templates (category Utility) in WhatsApp Manager:
+//   "collector_new_pickup":
+//     "Hello {{1}}, you have a new WasteCore pickup on {{2}}. Customer: {{3}}.
+//      Address: {{4}}. Directions: {{5}}. Reply JOBS to see all your pickups."
+//   "collector_daily_summary":
+//     "Good morning {{1}}! You have {{2}} WasteCore pickups today: {{3}}.
+//      Reply JOBS to see them with directions."
+const TEMPLATE_COLLECTOR_PICKUP = process.env.WAPI_TEMPLATE_COLLECTOR_PICKUP || "collector_new_pickup"
+const TEMPLATE_COLLECTOR_SUMMARY = process.env.WAPI_TEMPLATE_COLLECTOR_SUMMARY || "collector_daily_summary"
+const COLLECTOR_SUMMARY_HOUR = Number(process.env.COLLECTOR_SUMMARY_HOUR || 7) // Nigerian time
+const COLLECTOR_COLLECTIONS = ["instantPickups", "pickupRequests", "subscriptionVisits"]
+const OPEN_JOB_STATUSES = ["pending", "assigned", "confirmed"]
+const SERVICE_AREA = process.env.SERVICE_AREA || "Yenagoa"
+
+// Directions link; the town is added when the address doesn't name it.
+function mapsLink(address) {
+  const a = String(address || "").trim()
+  if (!a) return ""
+  const query = a.toLowerCase().includes(SERVICE_AREA.toLowerCase()) ? a : `${a}, ${SERVICE_AREA}`
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`
+}
+
+// "2026-11-07" -> "Sat 7 Nov"
+function shortDay(iso) {
+  const d = new Date(`${iso}T00:00:00`)
+  if (isNaN(d.getTime())) return iso || ""
+  return d.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" })
+}
+
+function jobWhat(job) {
+  if (job.bagCount) return bagsText(job.bagCount)
+  return job.serviceLabel || PICKUP_SERVICE_LABELS[job.serviceType] || (job.serviceType === "subscription" ? "Subscription pickup" : "Pickup")
+}
+
+function jobCustomer(job) {
+  const phone = toWhatsAppId(job.customerPhone)
+  return [job.customerName || "Customer", phone ? normalizePhone(phone) : null].filter(Boolean).join(" \u00B7 ")
+}
+
+async function loadCollector(collectorId) {
+  if (!collectorId) return null
+  const snap = await db.collection("collectors").doc(collectorId).get()
+  return snap.exists ? { ...snap.data(), id: collectorId } : null
+}
+
+// Collector whose WhatsApp number sent a message, if any (cached briefly).
+let collectorCache = { at: 0, list: [] }
+async function findCollectorByPhone(from) {
+  if (Date.now() - collectorCache.at > 5 * 60 * 1000) {
+    const snap = await db.collection("collectors").get()
+    collectorCache = { at: Date.now(), list: snap.docs.map((d) => ({ id: d.id, ...d.data() })) }
+  }
+  return collectorCache.list.find((c) => c.active !== false && toWhatsAppId(c.phone) === from) || null
+}
+
+// The dashboard sets collectorAssignedAt each time it assigns a collector;
+// collectorNotifiedAt records which assignment was messaged, so each one is
+// sent once (also after a restart) and older jobs are never re-sent.
+async function notifyCollectorIfAssigned(collectionName, docSnap) {
+  const job = docSnap.data()
+  if (!job.collectorId || !job.collectorAssignedAt || job.collectorAssignedAt === job.collectorNotifiedAt) return
+  if (!OPEN_JOB_STATUSES.includes(job.status)) return
+  try {
+    await docSnap.ref.update({ collectorNotifiedAt: job.collectorAssignedAt }, { lastUpdateTime: docSnap.updateTime })
+  } catch {
+    return // changed meanwhile; the next snapshot handles it
+  }
+  const collector = await loadCollector(job.collectorId)
+  const phone = toWhatsAppId(collector?.phone)
+  let status = "failed"
+  if (phone) {
+    const when = `${shortDay(job.pickupDate)}${job.timeWindow ? `, ${job.timeWindow}` : ""}`
+    const link = mapsLink(job.address)
+    status = await notifyCustomer(
+      phone,
+      TEMPLATE_COLLECTOR_PICKUP,
+      [collector.name || "there", when, `${jobCustomer(job)} (${jobWhat(job)})`, job.address || "-", link || "-"],
+      [
+        `\u{1F69B} *New pickup for you*`,
+        "",
+        `\u{1F4C5} ${when}`,
+        `\u{1F464} ${jobCustomer(job)}`,
+        `\u{1F4CD} ${job.address || "No address"}`,
+        ...(link ? [`\u{1F5FA} ${link}`] : []),
+        `\u{1F6CD} ${jobWhat(job)}`,
+        "",
+        "Reply *JOBS* to see all your pickups.",
+      ].join("\n")
+    )
+  }
+  await docSnap.ref.update({ collectorMessage: { status, at: new Date().toISOString() } })
+    .catch((err) => console.error(`Could not record collector message on ${collectionName}/${docSnap.id}:`, err))
+}
+
+// Open jobs on the given dates, grouped by collector id.
+async function jobsByCollector(dates) {
+  const snaps = await Promise.all(COLLECTOR_COLLECTIONS.flatMap((col) =>
+    dates.map((date) => db.collection(col).where("pickupDate", "==", date).get())
+  ))
+  const byCollector = new Map()
+  for (const snap of snaps) {
+    for (const d of snap.docs) {
+      const job = d.data()
+      if (!job.collectorId || !OPEN_JOB_STATUSES.includes(job.status)) continue
+      if (!byCollector.has(job.collectorId)) byCollector.set(job.collectorId, [])
+      byCollector.get(job.collectorId).push(job)
+    }
+  }
+  const order = { "Morning (8am-12pm)": 1, "Afternoon (12pm-4pm)": 2, "Evening (4pm-7pm)": 3 }
+  for (const list of byCollector.values()) {
+    list.sort((a, b) => a.pickupDate.localeCompare(b.pickupDate) || (order[a.timeWindow] ?? 0) - (order[b.timeWindow] ?? 0))
+  }
+  return byCollector
+}
+
+// Reply to "JOBS": today's and the next two days' open jobs.
+async function collectorJobsMessage(collector) {
+  const today = lagosToday()
+  const dates = [today, addDays(today, 1), addDays(today, 2)]
+  const jobs = (await jobsByCollector(dates)).get(collector.id) || []
+  if (!jobs.length) return `Hello ${collector.name || ""}! You have no pickups assigned for today or the next 2 days.`.replace("Hello !", "Hello!")
+  const lines = [`\u{1F4CB} *Your pickups, ${collector.name || ""}*`.replace(", *", "*")]
+  for (const date of dates) {
+    const day = jobs.filter((j) => j.pickupDate === date)
+    if (!day.length) continue
+    const label = date === today ? "Today" : date === dates[1] ? "Tomorrow" : ""
+    lines.push("", `*${label ? `${label}, ` : ""}${shortDay(date)}*`)
+    day.forEach((j, i) => {
+      const link = mapsLink(j.address)
+      lines.push(
+        `${i + 1}. ${jobCustomer(j)}`,
+        `   \u{1F4CD} ${j.address || "No address"}`,
+        ...(link ? [`   \u{1F5FA} ${link}`] : []),
+        `   \u{1F6CD} ${jobWhat(j)}${j.timeWindow ? ` \u00B7 ${j.timeWindow}` : ""}`
+      )
+    })
+  }
+  return lines.join("\n")
+}
+
+// Morning summary: once a day after COLLECTOR_SUMMARY_HOUR (Nigerian time),
+// each active collector with jobs today gets one message listing them.
+async function sendCollectorSummaries() {
+  const now = new Date()
+  const hour = Number(new Intl.DateTimeFormat("en-GB", { timeZone: "Africa/Lagos", hour: "numeric", hourCycle: "h23" }).format(now))
+  if (hour < COLLECTOR_SUMMARY_HOUR || hour >= 12) return
+  const today = lagosToday()
+  const markerRef = db.collection("config").doc("collectorSummary")
+  const claimed = await db.runTransaction(async (t) => {
+    const snap = await t.get(markerRef)
+    if (snap.exists && snap.data().lastDate === today) return false
+    t.set(markerRef, { lastDate: today, sentAt: now.toISOString() }, { merge: true })
+    return true
+  })
+  if (!claimed) return
+
+  const byCollector = await jobsByCollector([today])
+  let sent = 0
+  for (const [collectorId, jobs] of byCollector) {
+    const collector = await loadCollector(collectorId)
+    const phone = toWhatsAppId(collector?.phone)
+    if (!phone || collector.active === false) continue
+    const short = jobs.map((j, i) => `${i + 1}) ${j.customerName || "Customer"}, ${j.address || "no address"}`).join("; ")
+    await notifyCustomer(
+      phone,
+      TEMPLATE_COLLECTOR_SUMMARY,
+      [collector.name || "there", jobs.length, short.length > 700 ? `${short.slice(0, 690)}...` : short],
+      `\u2600\uFE0F *Good morning ${collector.name || ""}!*`.replace(" !*", "!*") +
+        `\n\nYou have ${jobs.length} pickup${jobs.length > 1 ? "s" : ""} today.\n\n` +
+        (await collectorJobsMessage(collector))
+    )
+    sent++
+  }
+  console.log(`Collector morning summary sent to ${sent} collector(s)`)
+}
+
+function setupCollectorSummaries() {
+  const run = () => sendCollectorSummaries().catch((err) => console.error("Collector summary failed:", err))
+  run()
+  setInterval(run, 10 * 60 * 1000).unref()
 }
 
 // ================= SUBSCRIBERS ADDED ON THE DASHBOARD =================
@@ -435,7 +636,7 @@ const SUBSCRIPTION_TIME_WINDOWS = {
 
 // Numbers typed on the dashboard ("0803 123 4567", "+234803...") as the
 // bot's WhatsApp id ("whatsapp:+234803..."). Nigerian numbers by default.
-function subscriberWhatsAppId(raw) {
+function toWhatsAppId(raw) {
   let digits = String(raw || "").replace(/\D/g, "")
   if (digits.length === 11 && digits.startsWith("0")) digits = `234${digits.slice(1)}`
   else if (digits.length === 10 && !digits.startsWith("0")) digits = `234${digits}`
@@ -456,7 +657,7 @@ const joinDays = (days) => days.length === 7 ? "Every day"
   : days.length > 1 ? `${days.slice(0, -1).join(", ")} & ${days[days.length - 1]}` : days.join("")
 
 async function sendSubscriptionConfirmation(data) {
-  const phone = subscriberWhatsAppId(data.customerPhone)
+  const phone = toWhatsAppId(data.customerPhone)
   if (!phone) return "invalid_phone"
   const plan = subscriptionPlanText(data.planId)
   const days = Array.isArray(data.pickupDays) ? data.pickupDays : []
@@ -1315,6 +1516,15 @@ nextApp.prepare().then(() => {
           return
         }
         throw err
+      }
+    }
+
+    // Collectors reply "JOBS" to get their pickup list.
+    if (/^(my\s+)?(jobs?|pickups?)[\s.!?]*$/.test(msg)) {
+      const collector = await findCollectorByPhone(from)
+      if (collector) {
+        await sendWhatsAppMessage(from, await collectorJobsMessage(collector))
+        return
       }
     }
 

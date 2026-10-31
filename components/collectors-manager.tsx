@@ -61,7 +61,8 @@ import {
   Users,
 } from "lucide-react"
 import { FirebaseService } from "@/lib/firebase-service"
-import type { Collector, CollectorInput, CollectorPickup, PickupStatus } from "@/lib/types"
+import { WEEK_DAYS, findPlan, planFullLabel } from "@/lib/subscriptions"
+import type { Collector, CollectorInput, CollectorPickup, PickupStatus, SubscriptionRow } from "@/lib/types"
 
 const UNASSIGNED = "__unassigned__"
 const ALL = "__all__"
@@ -109,6 +110,70 @@ function collectorMessage(pickup: CollectorPickup, collector: Collector): string
   ].join("\n")
 }
 
+// Same wording as the bot's time windows, so jobs sort and read the same.
+const VISIT_TIME_LABELS: Record<string, string> = {
+  morning: "Morning (8am-12pm)",
+  afternoon: "Afternoon (12pm-4pm)",
+  evening: "Evening (4pm-7pm)",
+}
+
+function isoDate(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
+}
+
+function addDaysIso(iso: string, days: number): string {
+  const d = new Date(`${iso}T00:00:00`)
+  d.setDate(d.getDate() + days)
+  return isoDate(d)
+}
+
+// Each active subscriber whose pickup days include `date` has a visit that
+// day. Saved visits (assigned or status changed) replace the computed one.
+function visitsForDate(date: string, subscribers: SubscriptionRow[], saved: CollectorPickup[]): CollectorPickup[] {
+  const weekday = WEEK_DAYS[(new Date(`${date}T00:00:00`).getDay() + 6) % 7]
+  const savedById = new Map(saved.filter((v) => v.pickupDate === date).map((v) => [v.id, v]))
+  const due = subscribers
+    .filter((s) => s.source === "admin" && s.status === "active" && s.pickupDays.includes(weekday) && (!s.startDate || s.startDate <= date))
+    .map((s): CollectorPickup => {
+      const id = `${s.id}_${date}`
+      const plan = findPlan(s.planId)
+      return savedById.get(id) ?? {
+        id,
+        collection: "subscriptionVisits",
+        subscriberId: s.id,
+        planId: s.planId,
+        customerName: s.customerName,
+        customerPhone: s.customerPhone,
+        address: s.address,
+        wasteType: "",
+        bagCount: null,
+        pickupDate: date,
+        serviceType: plan ? planFullLabel(plan) : "Subscription",
+        timeWindow: VISIT_TIME_LABELS[s.timeWindow] ?? "",
+        status: "pending",
+        collectorId: null,
+        collectorName: "",
+        collectorMessage: null,
+        createdAt: new Date(0),
+      }
+    })
+  // Saved visits for subscribers no longer due that day (e.g. paused since).
+  const dueIds = new Set(due.map((v) => v.id))
+  const extra = [...savedById.values()].filter((v) => !dueIds.has(v.id))
+  return [...due, ...extra].sort((a, b) => (a.timeWindow ?? "").localeCompare(b.timeWindow ?? "") || a.customerName.localeCompare(b.customerName))
+}
+
+// What happened to the bot's WhatsApp message to the collector.
+const COLLECTOR_MESSAGE: Record<string, { text: string; className: string; hint: string }> = {
+  template: { text: "✓ Collector notified", className: "text-green-700", hint: "The bot sent the pickup details to the collector on WhatsApp." },
+  text: {
+    text: "Sent as plain message",
+    className: "text-amber-700",
+    hint: "The approved template couldn't be used. A plain message only arrives if the collector messaged the bot in the last 24 hours.",
+  },
+  failed: { text: "Couldn't message collector", className: "text-destructive", hint: "Check the collector's WhatsApp number, or use Message manually." },
+}
+
 // Click-to-chat link: opens the WhatsApp app (or WhatsApp Web) on the
 // collector's chat with the pickup details already typed in.
 function whatsAppLink(pickup: CollectorPickup, collector: Collector): string {
@@ -122,6 +187,9 @@ interface CollectorsManagerProps {
 export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) {
   const [collectors, setCollectors] = useState<Collector[]>([])
   const [pickups, setPickups] = useState<CollectorPickup[]>([])
+  const [visits, setVisits] = useState<CollectorPickup[]>([])
+  const [subscribers, setSubscribers] = useState<SubscriptionRow[]>([])
+  const [visitDate, setVisitDate] = useState(() => isoDate(new Date()))
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -154,15 +222,23 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
       done()
     }, onError)
 
+    const unsubVisits = FirebaseService.subscribeToSubscriptionVisits(setVisits, onError)
+    const unsubSubscribers = FirebaseService.subscribeToSubscriptions(setSubscribers, onError)
+
     return () => {
       unsubCollectors()
       unsubPickups()
+      unsubVisits()
+      unsubSubscribers()
     }
   }, [])
 
+  const dayVisits = useMemo(() => visitsForDate(visitDate, subscribers, visits), [visitDate, subscribers, visits])
+  const today = isoDate(new Date())
+
   const statsByCollector = useMemo(() => {
     const stats = new Map<string, { open: number; completed: number; incomplete: number }>()
-    for (const p of pickups) {
+    for (const p of [...pickups, ...visits]) {
       if (!p.collectorId) continue
       const s = stats.get(p.collectorId) ?? { open: 0, completed: 0, incomplete: 0 }
       if (p.status === "completed") s.completed++
@@ -171,7 +247,7 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
       stats.set(p.collectorId, s)
     }
     return stats
-  }, [pickups])
+  }, [pickups, visits])
 
   const query = searchQuery.trim().toLowerCase()
 
@@ -236,7 +312,7 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
 
   const handleDelete = async () => {
     if (!deleting) return
-    const ok = await FirebaseService.deleteCollector(deleting.id, pickups)
+    const ok = await FirebaseService.deleteCollector(deleting.id, [...pickups, ...visits])
     if (!ok) setError(`Could not delete ${deleting.name}. Please try again.`)
     setDeleting(null)
   }
@@ -248,11 +324,9 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
   }
 
   // ── Pickup assignment ─────────────────────────────────────────────────────
+  // The bot messages the collector automatically once this is saved.
   const handleAssign = async (pickup: CollectorPickup, value: string) => {
     const collector = value === UNASSIGNED ? null : collectors.find((c) => c.id === value) ?? null
-    // Open WhatsApp before awaiting anything — browsers only allow new
-    // windows directly from the click.
-    if (collector) window.open(whatsAppLink(pickup, collector), "_blank", "noopener")
     const ok = await FirebaseService.assignPickup(pickup, collector)
     if (!ok) setError("Could not update the assignment. Please try again.")
   }
@@ -261,6 +335,66 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
     const ok = await FirebaseService.updatePickupStatus(pickup, status)
     if (!ok) setError("Could not update the pickup status. Please try again.")
   }
+
+  const collectorCell = (p: CollectorPickup) => {
+    // Keep a deleted/unknown collector visible instead of silently showing
+    // "Unassigned".
+    const known = !p.collectorId || collectors.some((c) => c.id === p.collectorId)
+    const assignedCollector = collectors.find((c) => c.id === p.collectorId)
+    const message = p.collectorId && p.collectorMessage ? COLLECTOR_MESSAGE[p.collectorMessage.status] : undefined
+    return (
+      <>
+        <Select value={p.collectorId ?? UNASSIGNED} onValueChange={(v) => handleAssign(p, v)}>
+          <SelectTrigger className="w-44">
+            <SelectValue placeholder="Assign collector" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={UNASSIGNED}>Unassigned</SelectItem>
+            {!known && p.collectorId && (
+              <SelectItem value={p.collectorId} disabled>
+                {p.collectorName || "Removed collector"}
+              </SelectItem>
+            )}
+            {collectors
+              .filter((c) => c.active || c.id === p.collectorId)
+              .map((c) => (
+                <SelectItem key={c.id} value={c.id}>
+                  {c.name}{c.area ? ` · ${c.area}` : ""}
+                </SelectItem>
+              ))}
+          </SelectContent>
+        </Select>
+        {message && (
+          <div className={`mt-1 text-[11px] ${message.className}`} title={message.hint}>{message.text}</div>
+        )}
+        {assignedCollector && (
+          <a
+            href={whatsAppLink(p, assignedCollector)}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="mt-1 inline-flex items-center gap-1 text-xs text-green-700 hover:underline"
+          >
+            <MessageCircle className="w-3 h-3" /> Message manually
+          </a>
+        )}
+      </>
+    )
+  }
+
+  const statusCell = (p: CollectorPickup) => (
+    <Select value={p.status} onValueChange={(v) => handleStatus(p, v as PickupStatus)}>
+      <SelectTrigger className="w-36">
+        <SelectValue>
+          <Badge className={STATUS_BADGE[p.status] ?? STATUS_BADGE.pending}>{p.status}</Badge>
+        </SelectValue>
+      </SelectTrigger>
+      <SelectContent>
+        {STATUS_OPTIONS.map((s) => (
+          <SelectItem key={s.value} value={s.value}>{s.label}</SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  )
 
   if (isLoading) {
     return (
@@ -397,11 +531,80 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
         </TabsContent>
 
         {/* ── Pickup assignment ───────────────────────────────────────────── */}
-        <TabsContent value="pickups">
+        <TabsContent value="pickups" className="space-y-6">
           <Card>
             <CardHeader>
               <CardTitle className="flex flex-wrap items-center justify-between gap-3">
-                <span>Pickups ({visiblePickups.length})</span>
+                <span>
+                  Subscription pickups ({dayVisits.length})
+                  <span className="block text-xs font-normal text-muted-foreground">
+                    Assign each day&apos;s visit to any collector. It only applies to that date.
+                  </span>
+                </span>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button size="sm" variant={visitDate === today ? "default" : "outline"} onClick={() => setVisitDate(today)}>Today</Button>
+                  <Button
+                    size="sm"
+                    variant={visitDate === addDaysIso(today, 1) ? "default" : "outline"}
+                    onClick={() => setVisitDate(addDaysIso(today, 1))}
+                  >
+                    Tomorrow
+                  </Button>
+                  <Input
+                    type="date"
+                    className="w-40"
+                    value={visitDate}
+                    onChange={(e) => e.target.value && setVisitDate(e.target.value)}
+                    aria-label="Visit date"
+                  />
+                </div>
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Customer</TableHead>
+                    <TableHead>Address</TableHead>
+                    <TableHead>Plan</TableHead>
+                    <TableHead>Time</TableHead>
+                    <TableHead>Collector</TableHead>
+                    <TableHead>Status</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {dayVisits.map((v) => (
+                    <TableRow key={v.id}>
+                      <TableCell className="font-medium">
+                        {v.customerName || "—"}
+                        <div className="text-xs font-normal text-muted-foreground">{v.customerPhone}</div>
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-2">
+                          <MapPin className="w-4 h-4 text-gray-400" />
+                          <span className="text-sm max-w-xs truncate">{v.address || "—"}</span>
+                        </div>
+                      </TableCell>
+                      <TableCell><Badge variant="outline">{v.serviceType}</Badge></TableCell>
+                      <TableCell className="text-sm">{v.timeWindow?.split(" (")[0] || "—"}</TableCell>
+                      <TableCell>{collectorCell(v)}</TableCell>
+                      <TableCell>{statusCell(v)}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+              {dayVisits.length === 0 && (
+                <div className="text-center py-8 text-gray-400">
+                  No subscription pickups on this day. Subscribers appear here on their pickup days once they have a schedule.
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex flex-wrap items-center justify-between gap-3">
+                <span>Instant &amp; scheduled pickups ({visiblePickups.length})</span>
                 <div className="flex flex-wrap gap-2">
                   <Select value={collectorFilter} onValueChange={setCollectorFilter}>
                     <SelectTrigger className="w-48">
@@ -443,10 +646,6 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
                 </TableHeader>
                 <TableBody>
                   {visiblePickups.map((p) => {
-                    // Keep a deleted/unknown collector visible instead of
-                    // silently showing "Unassigned".
-                    const known = !p.collectorId || collectors.some((c) => c.id === p.collectorId)
-                    const assignedCollector = collectors.find((c) => c.id === p.collectorId)
                     return (
                       <TableRow key={`${p.collection}_${p.id}`}>
                         <TableCell className="font-medium">{p.customerName || "—"}</TableCell>
@@ -465,55 +664,8 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
                             <span className="text-sm">{p.pickupDate || "—"}</span>
                           </div>
                         </TableCell>
-                        <TableCell>
-                          <Select
-                            value={p.collectorId ?? UNASSIGNED}
-                            onValueChange={(v) => handleAssign(p, v)}
-                          >
-                            <SelectTrigger className="w-44">
-                              <SelectValue placeholder="Assign collector" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value={UNASSIGNED}>Unassigned</SelectItem>
-                              {!known && p.collectorId && (
-                                <SelectItem value={p.collectorId} disabled>
-                                  {p.collectorName || "Removed collector"}
-                                </SelectItem>
-                              )}
-                              {collectors
-                                .filter((c) => c.active || c.id === p.collectorId)
-                                .map((c) => (
-                                  <SelectItem key={c.id} value={c.id}>
-                                    {c.name}{c.area ? ` · ${c.area}` : ""}
-                                  </SelectItem>
-                                ))}
-                            </SelectContent>
-                          </Select>
-                          {assignedCollector && (
-                            <a
-                              href={whatsAppLink(p, assignedCollector)}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="mt-1 inline-flex items-center gap-1 text-xs text-green-700 hover:underline"
-                            >
-                              <MessageCircle className="w-3 h-3" /> Send on WhatsApp
-                            </a>
-                          )}
-                        </TableCell>
-                        <TableCell>
-                          <Select value={p.status} onValueChange={(v) => handleStatus(p, v as PickupStatus)}>
-                            <SelectTrigger className="w-36">
-                              <SelectValue>
-                                <Badge className={STATUS_BADGE[p.status] ?? STATUS_BADGE.pending}>{p.status}</Badge>
-                              </SelectValue>
-                            </SelectTrigger>
-                            <SelectContent>
-                              {STATUS_OPTIONS.map((s) => (
-                                <SelectItem key={s.value} value={s.value}>{s.label}</SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                        </TableCell>
+                        <TableCell>{collectorCell(p)}</TableCell>
+                        <TableCell>{statusCell(p)}</TableCell>
                       </TableRow>
                     )
                   })}
@@ -534,7 +686,7 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
           <DialogHeader>
             <DialogTitle>{editing ? "Edit collector" : "Register collector"}</DialogTitle>
             <DialogDescription>
-              Assigning a pickup opens WhatsApp with the pickup details ready to send to this number. Customers are never sent the collector&apos;s name.
+              When you assign a pickup, the bot sends the details to this WhatsApp number automatically, plus a morning summary of the day&apos;s pickups. Collectors can reply JOBS to the bot for their list. Customers are never sent the collector&apos;s name.
             </DialogDescription>
           </DialogHeader>
           <form

@@ -46,10 +46,12 @@ export type PickupCollection = "instantPickups" | "pickupRequests"
 
 export type PickupStatus = "pending" | "assigned" | "completed" | "incomplete" | "cancelled"
 
-// A pickup from either pickup collection, as shown on the Collectors page.
+// A pickup from either pickup collection, or one day's visit for a
+// subscriber (subscriptionVisits/{subscriberId}_{date}), as shown on the
+// Collectors page.
 export interface CollectorPickup {
   id: string
-  collection: PickupCollection
+  collection: PickupCollection | "subscriptionVisits"
   customerName: string
   customerPhone: string
   address: string
@@ -60,6 +62,12 @@ export interface CollectorPickup {
   status: string
   collectorId: string | null
   collectorName: string
+  timeWindow?: string
+  // Subscription visits only.
+  subscriberId?: string
+  planId?: string
+  // Outcome of the bot's WhatsApp message to the collector.
+  collectorMessage?: { status: string; at?: string } | null
   createdAt: Date
 }
 
