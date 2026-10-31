@@ -278,13 +278,14 @@ const templateSent = (data) =>
 // Sends an approved template; if that fails (e.g. the template is missing
 // in Flaxxa) falls back to a plain message, which still reaches customers
 // who messaged the bot in the last 24 hours.
+// Returns "template", "text" (sent as a plain message) or "failed".
 async function notifyCustomer(phone, templateName, params, fallbackText) {
   const data = await sendWhatsAppTemplate(phone, templateName, "en_US", [
     { type: "body", parameters: params.map((text) => ({ type: "text", text: String(text ?? "") })) },
   ])
-  if (templateSent(data)) return
+  if (templateSent(data)) return "template"
   console.warn(`Template "${templateName}" not sent to ${phone}; sending a plain message instead.`)
-  await sendWhatsAppMessage(phone, fallbackText)
+  return (await sendWhatsAppMessage(phone, fallbackText)) ? "text" : "failed"
 }
 
 // Bookings paid by Paystack (or a bank transfer an admin has checked)
@@ -371,6 +372,118 @@ function setupStatusListeners() {
   handleChanges("upgradeRequests")
   handleChanges("wasteBagOrders")
   handleChanges("supportTickets")
+  setupSubscriberWelcome()
+}
+
+// ================= SUBSCRIBERS ADDED ON THE DASHBOARD =================
+// When an admin registers a subscriber with "Send WhatsApp confirmation"
+// ticked, the dashboard saves sendWhatsAppConfirmation: true. The bot sends
+// the message once and records the outcome in whatsAppConfirmation, which
+// the dashboard shows. "Send again" clears it to resend.
+//
+// Customers added by hand have usually never messaged the bot, so this
+// needs an approved template in Flaxxa (WAPI_TEMPLATE_SUBSCRIPTION):
+//   name: "subscription_confirmed"   language: en_US   category: Utility
+//   body: "Hello {{1}}, your WasteCore {{2}} subscription is now active.
+//          Pickups: {{3}}, starting {{4}}. Reply HI anytime to book or get help."
+const TEMPLATE_SUBSCRIPTION = process.env.WAPI_TEMPLATE_SUBSCRIPTION || "subscription_confirmed"
+
+const SUBSCRIPTION_TIME_WINDOWS = {
+  morning: "Morning (8am-12pm)",
+  afternoon: "Afternoon (12pm-4pm)",
+  evening: "Evening (4pm-7pm)",
+}
+
+// Numbers typed on the dashboard ("0803 123 4567", "+234803...") as the
+// bot's WhatsApp id ("whatsapp:+234803..."). Nigerian numbers by default.
+function subscriberWhatsAppId(raw) {
+  let digits = String(raw || "").replace(/\D/g, "")
+  if (digits.length === 11 && digits.startsWith("0")) digits = `234${digits.slice(1)}`
+  else if (digits.length === 10 && !digits.startsWith("0")) digits = `234${digits}`
+  return digits.length >= 10 && digits.length <= 15 ? `whatsapp:+${digits}` : null
+}
+
+function subscriptionPlanText(planId) {
+  const [category, n] = String(planId).split("_")
+  const plan = MONTHLY_PLANS[category]
+  if (plan?.prices[n]) return { label: monthlyPlanLabel(planId).replace(" - ", " plan \u00B7 "), price: `${naira(plan.prices[n])}/month` }
+  if (WEEKLY_PLAN_LABELS[planId]) return { label: `Weekly plan \u00B7 ${WEEKLY_PLAN_LABELS[planId]}`, price: `${naira(SERVICE_PRICES[planId])}/week` }
+  const price = SERVICE_PRICES[`upgrade_${planId}`]
+  return { label: `${String(planId).charAt(0).toUpperCase()}${String(planId).slice(1)} plan`, price: price ? `${naira(price)}/month` : "" }
+}
+
+// "Mon, Wed & Fri"
+const joinDays = (days) => days.length === 7 ? "Every day"
+  : days.length > 1 ? `${days.slice(0, -1).join(", ")} & ${days[days.length - 1]}` : days.join("")
+
+async function sendSubscriptionConfirmation(data) {
+  const phone = subscriberWhatsAppId(data.customerPhone)
+  if (!phone) return "invalid_phone"
+  const plan = subscriptionPlanText(data.planId)
+  const days = Array.isArray(data.pickupDays) ? data.pickupDays : []
+  const time = SUBSCRIPTION_TIME_WINDOWS[data.timeWindow]
+  const schedule = days.length ? `${joinDays(days)}${time ? `, ${time}` : ""}` : "to be confirmed"
+  const start = data.startDate ? displayDate(data.startDate) : "soon"
+  const name = String(data.customerName || "").trim()
+
+  // Returning customers are greeted by name when they next message the bot.
+  const isBusiness = String(data.planId).startsWith("business")
+  const profile = await loadCustomer(phone).catch(() => null)
+  if (name && !(isBusiness ? profile?.businessName : profile?.name)) {
+    await saveCustomer(phone, isBusiness ? { businessName: name } : { name }).catch(() => {})
+  }
+
+  return notifyCustomer(
+    phone,
+    TEMPLATE_SUBSCRIPTION,
+    [name || "there", plan.label, schedule, start],
+    [
+      `\u2705 *Your WasteCore subscription is active!*`,
+      "",
+      `Hello ${name || "there"},`,
+      "",
+      `*${plan.label}*`,
+      ...(data.address ? [`\u{1F4CD} ${data.address}`] : []),
+      `\u{1F5D3} Pickups: ${schedule}`,
+      `\u{1F4C5} Starts ${start}`,
+      ...(plan.price ? [`\u{1F4B0} ${plan.price}`] : []),
+      "",
+      "Reply *hi* anytime to book another service or talk to support.",
+    ].join("\n")
+  )
+}
+
+function setupSubscriberWelcome() {
+  db.collection("subscribers").onSnapshot(
+    (snapshot) => {
+      snapshot.docChanges().forEach(async (change) => {
+        if (change.type === "removed") return
+        const data = change.doc.data()
+        if (data.sendWhatsAppConfirmation !== true || data.whatsAppConfirmation || data.status !== "active") return
+        try {
+          // Claim it first (fails if the document changed since), so a
+          // repeated snapshot can never send the message twice.
+          await change.doc.ref.update(
+            { whatsAppConfirmation: { status: "sending", at: new Date().toISOString() } },
+            { lastUpdateTime: change.doc.updateTime }
+          )
+        } catch {
+          return
+        }
+        let status
+        try {
+          status = await sendSubscriptionConfirmation(data)
+        } catch (err) {
+          console.error(`Subscription confirmation failed for ${change.doc.id}:`, err)
+          status = "failed"
+        }
+        await change.doc.ref.update({
+          whatsAppConfirmation: { status, at: new Date().toISOString() },
+        }).catch((err) => console.error("Could not record confirmation status:", err))
+      })
+    },
+    (err) => console.error("Snapshot listener error on subscribers:", err)
+  )
 }
 
 // ================= HELPERS =================

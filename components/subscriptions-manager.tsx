@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
+import { Checkbox } from "@/components/ui/checkbox"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
   Table,
@@ -56,6 +57,7 @@ import {
   Pencil,
   Phone,
   Play,
+  Send,
   Trash2,
   UserPlus,
 } from "lucide-react"
@@ -99,6 +101,19 @@ const EMPTY_FORM: SubscriberInput = {
   linkedRequestId: null,
 }
 
+// What happened to the WhatsApp confirmation for a dashboard subscriber.
+const WHATSAPP_STATUS: Record<string, { text: string; className: string; hint: string }> = {
+  sending: { text: "Sending WhatsApp…", className: "text-muted-foreground", hint: "The bot is sending the confirmation." },
+  template: { text: "✓ WhatsApp sent", className: "text-green-700", hint: "Confirmation sent." },
+  text: {
+    text: "Sent as plain message",
+    className: "text-amber-700",
+    hint: "The approved template couldn't be used, so a plain message was sent. It only arrives if the customer messaged the bot in the last 24 hours.",
+  },
+  failed: { text: "WhatsApp not sent", className: "text-destructive", hint: "The message could not be sent. Use Send WhatsApp again." },
+  invalid_phone: { text: "Invalid WhatsApp number", className: "text-destructive", hint: "Edit the phone number, then use Send WhatsApp again." },
+}
+
 function todayIso(): string {
   const d = new Date()
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
@@ -123,6 +138,7 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
   const [editingId, setEditingId] = useState<string | null>(null)
   const [form, setForm] = useState<SubscriberInput>(EMPTY_FORM)
   const [formError, setFormError] = useState<string | null>(null)
+  const [sendWhatsApp, setSendWhatsApp] = useState(true)
   const [deleting, setDeleting] = useState<SubscriptionRow | null>(null)
 
   useEffect(() => {
@@ -156,6 +172,7 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
   const openCreate = () => {
     setEditingId(null)
     setForm({ ...EMPTY_FORM, planId: kind === "household" ? "household_1" : "business_1", startDate: todayIso() })
+    setSendWhatsApp(true)
     setFormError(null)
     setFormOpen(true)
   }
@@ -177,6 +194,7 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
       notes: row.notes,
       linkedRequestId: row.source === "whatsapp" ? row.id : row.linkedRequestId ?? null,
     })
+    setSendWhatsApp(true)
     setFormError(null)
     setFormOpen(true)
   }
@@ -231,12 +249,17 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
     setFormOpen(false)
     const ok = editingId
       ? await FirebaseService.updateSubscriber(editingId, input)
-      : await FirebaseService.createSubscriber(input)
+      : await FirebaseService.createSubscriber(input, sendWhatsApp)
     if (!ok) setError(`Could not save ${input.customerName}. Please try again.`)
   }
 
+  const resendWhatsApp = async (row: SubscriptionRow) => {
+    const ok = await FirebaseService.resendSubscriberWhatsApp(row.id)
+    if (!ok) setError(`Could not send the WhatsApp message to ${row.customerName}. Please try again.`)
+  }
+
   const setStatus = async (row: SubscriptionRow, status: SubscriberStatus) => {
-    const { id, source, collection, kind: _k, requestStatus, createdAt, ...input } = row
+    const { id, source, collection, kind: _k, requestStatus, whatsAppConfirmation, createdAt, ...input } = row
     const ok = await FirebaseService.updateSubscriber(id, { ...input, status })
     if (!ok) setError("Could not update the status. Please try again.")
   }
@@ -379,6 +402,14 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
                         {r.source === "whatsapp" && (
                           <span className="text-[11px] text-muted-foreground">via WhatsApp</span>
                         )}
+                        {r.source === "admin" && r.whatsAppConfirmation && WHATSAPP_STATUS[r.whatsAppConfirmation.status] && (
+                          <span
+                            className={cn("text-[11px]", WHATSAPP_STATUS[r.whatsAppConfirmation.status].className)}
+                            title={WHATSAPP_STATUS[r.whatsAppConfirmation.status].hint}
+                          >
+                            {WHATSAPP_STATUS[r.whatsAppConfirmation.status].text}
+                          </span>
+                        )}
                       </div>
                     </TableCell>
                     <TableCell>
@@ -397,6 +428,12 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
                             <DropdownMenuItem onClick={() => openEdit(r)}>
                               <Pencil className="mr-2 h-4 w-4" /> Edit
                             </DropdownMenuItem>
+                            {r.status === "active" && r.whatsAppConfirmation?.status !== "sending" && (
+                              <DropdownMenuItem onClick={() => resendWhatsApp(r)}>
+                                <Send className="mr-2 h-4 w-4" />
+                                {r.whatsAppConfirmation ? "Send WhatsApp again" : "Send WhatsApp confirmation"}
+                              </DropdownMenuItem>
+                            )}
                             {r.status === "active" ? (
                               <DropdownMenuItem onClick={() => setStatus(r, "paused")}>
                                 <Pause className="mr-2 h-4 w-4" /> Pause
@@ -568,6 +605,22 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
               <Textarea id="sub-notes" rows={2} placeholder="e.g. Gate code, call before arriving"
                 value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
             </div>
+
+            {!editingId && (
+              <label className="flex items-start gap-3 rounded-lg border p-3 text-sm">
+                <Checkbox
+                  checked={sendWhatsApp}
+                  onCheckedChange={(v) => setSendWhatsApp(v === true)}
+                  className="mt-0.5"
+                />
+                <span>
+                  <span className="font-medium">Send the customer a WhatsApp confirmation</span>
+                  <span className="block text-xs text-muted-foreground">
+                    The bot messages this number with their plan, pickup days and start date.
+                  </span>
+                </span>
+              </label>
+            )}
 
             {formError && <p className="text-sm text-destructive">{formError}</p>}
             <DialogFooter>
