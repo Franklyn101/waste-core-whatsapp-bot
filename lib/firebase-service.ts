@@ -7,6 +7,7 @@ import {
   deleteDoc,
   writeBatch,
   onSnapshot,
+  setDoc,
   type QuerySnapshot,
   type DocumentData,
   Timestamp,
@@ -45,6 +46,30 @@ function startOfToday(): Date {
   const today = new Date()
   today.setHours(0, 0, 0, 0)
   return today
+}
+
+// A subscription visit only exists as a document once it's assigned or its
+// status is changed, so it's written with all its details (merge keeps the
+// rest). Other pickups already exist and are updated.
+async function writePickup(pickup: CollectorPickup, update: Record<string, unknown>) {
+  if (pickup.collection !== "subscriptionVisits") {
+    await updateDoc(doc(db, pickup.collection, pickup.id), update)
+    return
+  }
+  await setDoc(doc(db, "subscriptionVisits", pickup.id), {
+    subscriberId: pickup.subscriberId ?? null,
+    planId: pickup.planId ?? null,
+    customerName: pickup.customerName,
+    customerPhone: pickup.customerPhone,
+    address: pickup.address,
+    pickupDate: pickup.pickupDate,
+    timeWindow: pickup.timeWindow ?? null,
+    serviceType: "subscription",
+    serviceLabel: pickup.serviceType,
+    ...(pickup.status === "pending" && !("status" in update) ? { status: "pending" } : {}),
+    ...(pickup.createdAt.getTime() > 0 ? {} : { createdAt: new Date().toISOString() }),
+    ...update,
+  }, { merge: true })
 }
 
 // ======================
@@ -148,7 +173,7 @@ function normalizeCollector(data: any, id: string): Collector {
   }
 }
 
-function normalizeCollectorPickup(data: any, id: string, col: PickupCollection): CollectorPickup {
+function normalizeCollectorPickup(data: any, id: string, col: CollectorPickup["collection"]): CollectorPickup {
   return {
     id,
     collection:    col,
@@ -162,6 +187,10 @@ function normalizeCollectorPickup(data: any, id: string, col: PickupCollection):
     status:        data.status ?? "pending",
     collectorId:   data.collectorId ?? null,
     collectorName: data.collectorName ?? "",
+    timeWindow:    data.timeWindow ?? "",
+    subscriberId:  data.subscriberId ?? undefined,
+    planId:        data.planId ?? undefined,
+    collectorMessage: data.collectorMessage ?? null,
     createdAt:     parseDate(data.createdAt),
   }
 }
@@ -505,6 +534,8 @@ export class FirebaseService {
   // Assigning moves a pending pickup to "assigned"; unassigning returns an
   // unfinished pickup to "pending". The collector's name is stored for the
   // admin only — the customer notification never includes it.
+  // collectorAssignedAt tells the bot to message the collector (once per
+  // assignment).
   static async assignPickup(pickup: CollectorPickup, collector: Collector | null): Promise<boolean> {
     try {
       const update: Record<string, unknown> = {
@@ -512,21 +543,34 @@ export class FirebaseService {
         collectorName: collector?.name ?? "",
         updatedAt: new Date().toISOString(),
       }
+      if (collector) update.collectorAssignedAt = update.updatedAt
       if (collector && pickup.status === "pending") {
         update.status = "assigned"
         update.assignedAt = update.updatedAt
       }
       if (!collector && pickup.status === "assigned") update.status = "pending"
-      await updateDoc(doc(db, pickup.collection, pickup.id), update)
+      await writePickup(pickup, update)
       return true
     } catch (err) { console.error("pickup assign failed", err); return false }
   }
 
   static async updatePickupStatus(pickup: CollectorPickup, status: PickupStatus): Promise<boolean> {
     try {
-      await updateDoc(doc(db, pickup.collection, pickup.id), { status, updatedAt: new Date().toISOString() })
+      await writePickup(pickup, { status, updatedAt: new Date().toISOString() })
       return true
     } catch (err) { console.error("pickup status update failed", err); return false }
+  }
+
+  // Saved subscription visits (one document per subscriber per day).
+  static subscribeToSubscriptionVisits(
+    callback: (visits: CollectorPickup[]) => void,
+    onError?: (err: Error) => void
+  ): () => void {
+    return onSnapshot(
+      collection(db, "subscriptionVisits"),
+      (snapshot) => callback(snapshot.docs.map((d) => normalizeCollectorPickup(d.data(), d.id, "subscriptionVisits"))),
+      (err) => { console.error("subscriptionVisits error:", err); callback([]); onError?.(err) }
+    )
   }
 
   // ── SUBSCRIPTIONS (weekly + monthly) ──────────────────────────────────────
