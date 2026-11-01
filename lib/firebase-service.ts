@@ -8,6 +8,7 @@ import {
   writeBatch,
   onSnapshot,
   setDoc,
+  arrayUnion,
   type QuerySnapshot,
   type DocumentData,
   Timestamp,
@@ -26,6 +27,8 @@ import type {
   PickupStatus,
   SubscriberInput,
   SubscriptionRow,
+  SubscriptionPayment,
+  PaymentInput,
 } from "./types"
 import { findPlan } from "./subscriptions"
 
@@ -195,6 +198,16 @@ function normalizeCollectorPickup(data: any, id: string, col: CollectorPickup["c
   }
 }
 
+function normalizePayment(data: any): SubscriptionPayment {
+  return {
+    paidUntil: data.paidUntil ?? null,
+    lastPaymentDate: data.lastPaymentDate ?? null,
+    lastPaymentAmount: data.lastPaymentAmount ?? null,
+    lastPaymentMethod: data.lastPaymentMethod ?? null,
+    receiptUnverified: !data.paidUntil && data.paymentMethod === "bank_transfer" && data.paymentStatus !== "paid",
+  }
+}
+
 function normalizeSubscriber(data: any, id: string): SubscriptionRow {
   const plan = findPlan(data.planId)
   return {
@@ -214,6 +227,8 @@ function normalizeSubscriber(data: any, id: string): SubscriptionRow {
     notes: data.notes ?? "",
     linkedRequestId: data.linkedRequestId ?? null,
     whatsAppConfirmation: data.whatsAppConfirmation ?? null,
+    payment: normalizePayment(data),
+    renewalReminder: data.renewalReminder ?? null,
     createdAt: parseDate(data.createdAt),
   }
 }
@@ -245,6 +260,8 @@ function normalizeWhatsAppSubscription(
     status: data.status === "cancelled" ? "cancelled" : "active",
     requestStatus: data.status ?? "pending",
     notes: "",
+    payment: normalizePayment(data),
+    renewalReminder: data.renewalReminder ?? null,
     createdAt: parseDate(data.createdAt),
   }
 }
@@ -615,17 +632,63 @@ export class FirebaseService {
   }
 
   // sendWhatsApp asks the bot to message the customer a confirmation.
-  static async createSubscriber(input: SubscriberInput, sendWhatsApp = false): Promise<boolean> {
+  // `payment` carries over the paid-until date of the WhatsApp plan request
+  // a subscriber is created from.
+  static async createSubscriber(input: SubscriberInput, sendWhatsApp = false, payment?: SubscriptionPayment): Promise<boolean> {
     try {
       const now = new Date().toISOString()
       await addDoc(collection(db, "subscribers"), {
         ...input,
         ...(sendWhatsApp ? { sendWhatsAppConfirmation: true } : {}),
+        ...(payment?.paidUntil ? {
+          paidUntil: payment.paidUntil,
+          lastPaymentDate: payment.lastPaymentDate,
+          lastPaymentAmount: payment.lastPaymentAmount,
+          lastPaymentMethod: payment.lastPaymentMethod,
+        } : {}),
         createdAt: now,
         updatedAt: now,
       })
       return true
     } catch (err) { console.error("subscriber create failed", err); return false }
+  }
+
+  // Changes only the status, so payment dates the bot updates meanwhile are kept.
+  static async setSubscriberStatus(id: string, status: string): Promise<boolean> {
+    try {
+      await updateDoc(doc(db, "subscribers", id), { status, updatedAt: new Date().toISOString() })
+      return true
+    } catch (err) { console.error("subscriber status update failed", err); return false }
+  }
+
+  // A payment taken outside the bot (cash, transfer, POS...). Works for
+  // dashboard subscribers and WhatsApp plan requests alike.
+  static async recordSubscriptionPayment(row: SubscriptionRow, payment: PaymentInput): Promise<boolean> {
+    try {
+      const now = new Date().toISOString()
+      await updateDoc(doc(db, row.collection, row.id), {
+        lastPaymentDate: payment.date,
+        lastPaymentAmount: payment.amount,
+        lastPaymentMethod: payment.method,
+        paidUntil: payment.paidUntil,
+        payments: arrayUnion({ ...payment, recordedAt: now }),
+        // A WhatsApp request paid by transfer counts as verified once recorded.
+        ...(row.collection !== "subscribers" ? { paymentStatus: "paid" } : {}),
+        updatedAt: now,
+      })
+      return true
+    } catch (err) { console.error("payment record failed", err); return false }
+  }
+
+  // Asks the bot to send each customer a renewal reminder with a pay link.
+  static async requestRenewalReminders(rows: SubscriptionRow[]): Promise<boolean> {
+    try {
+      const now = new Date().toISOString()
+      const batch = writeBatch(db)
+      rows.forEach((r) => batch.update(doc(db, r.collection, r.id), { renewalReminderRequestedAt: now }))
+      await batch.commit()
+      return true
+    } catch (err) { console.error("renewal reminder request failed", err); return false }
   }
 
   // Clearing the last outcome makes the bot send the confirmation again.

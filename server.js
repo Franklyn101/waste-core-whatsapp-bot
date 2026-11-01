@@ -284,7 +284,7 @@ const templateParam = (text) => String(text ?? "").replace(/\s+/g, " ").trim().s
 // token as the Pay button), so it works even if Flaxxa blocks template
 // sending. Templates are created in WhatsApp Manager > Message templates.
 // Tries "English (US)" then "English", whichever the template was made in.
-async function sendMetaTemplate(to, templateName, params) {
+async function sendMetaTemplate(to, templateName, params, { urlButtonParam } = {}) {
   const numberId = whatsAppNumberId()
   const token = process.env.WHATSAPP_ACCESS_TOKEN
   const phone = normalizePhone(to).replace(/\D/g, "")
@@ -300,7 +300,11 @@ async function sendMetaTemplate(to, templateName, params) {
           template: {
             name: templateName,
             language: { code },
-            components: [{ type: "body", parameters: params.map((text) => ({ type: "text", text: templateParam(text) })) }],
+            components: [
+              { type: "body", parameters: params.map((text) => ({ type: "text", text: templateParam(text) })) },
+              // Fills the end of a "Visit website" button's dynamic URL.
+              ...(urlButtonParam ? [{ type: "button", sub_type: "url", index: "0", parameters: [{ type: "text", text: urlButtonParam }] }] : []),
+            ],
           },
         },
         { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, timeout: 15000 }
@@ -320,14 +324,21 @@ async function sendMetaTemplate(to, templateName, params) {
 // (e.g. the template isn't approved yet) falls back to a plain message,
 // which still reaches customers who messaged the bot in the last 24 hours.
 // Returns "template", "text" (sent as a plain message) or "failed".
-async function notifyCustomer(phone, templateName, params, fallbackText) {
-  if (await sendMetaTemplate(phone, templateName, params)) return "template"
+// Options for templates with a "Visit website" button: urlButtonParam fills
+// its URL, and fallbackButton ({ text, url }) is offered in the plain message.
+async function notifyCustomer(phone, templateName, params, fallbackText, { urlButtonParam, fallbackButton } = {}) {
+  if (await sendMetaTemplate(phone, templateName, params, { urlButtonParam })) return "template"
   const data = await sendWhatsAppTemplate(phone, templateName, "en_US", [
     { type: "body", parameters: params.map((text) => ({ type: "text", text: templateParam(text) })) },
+    ...(urlButtonParam ? [{ type: "button", sub_type: "url", index: "0", parameters: [{ type: "text", text: urlButtonParam }] }] : []),
   ])
   if (templateSent(data)) return "template"
   console.warn(`Template "${templateName}" not sent to ${phone}; sending a plain message instead.`)
-  return (await sendWhatsAppMessage(phone, fallbackText)) ? "text" : "failed"
+  if (fallbackButton && await sendWhatsAppUrlButton(phone, { body: fallbackText, buttonText: fallbackButton.text, url: fallbackButton.url })) {
+    return "text"
+  }
+  const text = fallbackButton ? `${fallbackText}\n\n${fallbackButton.url}` : fallbackText
+  return (await sendWhatsAppMessage(phone, text)) ? "text" : "failed"
 }
 
 // Bookings paid by Paystack (or a bank transfer an admin has checked)
@@ -345,6 +356,11 @@ function setupStatusListeners() {
           // A collector was (re)assigned on the dashboard: message them.
           if (change.type !== "removed" && COLLECTOR_COLLECTIONS.includes(collectionName)) {
             await notifyCollectorIfAssigned(collectionName, change.doc)
+          }
+
+          if (change.type !== "removed" && collectionName === "upgradeRequests") {
+            await setPaidUntilOnceVerified(change.doc)
+            await sendRenewalReminderIfRequested("upgradeRequests", change.doc)
           }
 
           // Record the current status on existing/new docs without notifying,
@@ -424,6 +440,148 @@ function setupStatusListeners() {
   handleChanges("subscriptionVisits")
   setupSubscriberWelcome()
   setupCollectorSummaries()
+}
+
+// ================= SUBSCRIPTION PAYMENTS & RENEWALS =================
+// Each subscription (an admin-registered subscriber, or a monthly plan
+// booked on WhatsApp in upgradeRequests) carries:
+//   lastPaymentDate, lastPaymentAmount, lastPaymentMethod, payments[] and
+//   paidUntil: the date the next monthly payment is due.
+// Bot payments set them automatically; admins record cash/transfer/POS
+// payments on the dashboard. "Send renewal reminder" on the dashboard sets
+// renewalReminderRequestedAt; the bot then sends the customer a "Renew now"
+// link (/renew/<token>) that opens a Paystack payment for their plan. When
+// it's paid, paidUntil moves on by a month.
+//
+// Customers may not have messaged the bot recently, so the reminder needs
+// an approved template (WAPI_TEMPLATE_RENEWAL), category Utility:
+//   name: "subscription_renewal"
+//   body: "Hello {{1}}, your WasteCore {{2}} subscription {{3}}. Renew for {{4}}
+//          to keep your pickups going. Tap the button below to pay securely."
+//   button: Visit website, "Renew now", dynamic URL
+//           <PUBLIC_BASE_URL>/renew/{{1}}
+const TEMPLATE_RENEWAL = process.env.WAPI_TEMPLATE_RENEWAL || "subscription_renewal"
+
+// "2026-01-31" + 1 month -> "2026-02-28" (the day is kept where it exists).
+function addMonthsIso(iso, months) {
+  const [y, m, d] = String(iso).slice(0, 10).split("-").map(Number)
+  const target = new Date(Date.UTC(y, m - 1 + months, 1))
+  const lastDay = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate()
+  target.setUTCDate(Math.min(d, lastDay))
+  return target.toISOString().slice(0, 10)
+}
+
+const laterDate = (a, b) => (!a ? b : !b ? a : a > b ? a : b)
+
+// Plan id from a subscriber ("business_2") or WhatsApp plan request.
+const subscriptionPlanId = (data) =>
+  data.planId || data.plan || String(data.serviceType || "").replace(/^upgrade_/, "")
+
+// Monthly price, or null for retired weekly plans (not renewed here).
+function monthlyPrice(planId) {
+  const [category, n] = String(planId).split("_")
+  return MONTHLY_PLANS[category]?.prices[n] ?? SERVICE_PRICES[`upgrade_${planId}`] ?? null
+}
+
+// WhatsApp plan requests paid by bank transfer get their paid-until date
+// once an admin verifies the receipt (Paystack ones get it when paid).
+async function setPaidUntilOnceVerified(docSnap) {
+  const data = docSnap.data()
+  if (data.paidUntil || !paymentVerified(data)) return
+  const paidOn = String(data.paidAt || data.receiptVerifiedAt || data.createdAt || lagosToday()).slice(0, 10)
+  const amount = data.totalAmount ?? monthlyPrice(subscriptionPlanId(data))
+  await docSnap.ref.update({
+    lastPaymentDate: paidOn,
+    lastPaymentAmount: amount ?? null,
+    lastPaymentMethod: data.paymentMethod || "bank_transfer",
+    paidUntil: addMonthsIso(laterDate(data.startDate, paidOn), 1),
+    payments: [...(data.payments || []), { date: paidOn, amount: amount ?? null, method: data.paymentMethod || "bank_transfer", months: 1 }],
+  })
+}
+
+function renewalWhen(paidUntil) {
+  if (!paidUntil) return "is due for renewal"
+  return paidUntil < lagosToday() ? `expired on ${displayDate(paidUntil)}` : `expires on ${displayDate(paidUntil)}`
+}
+
+// Sends one reminder per click on the dashboard (renewalReminderRequestedAt),
+// recording the outcome in renewalReminder for the dashboard to show.
+async function sendRenewalReminderIfRequested(collectionName, docSnap) {
+  const data = docSnap.data()
+  const requestedAt = data.renewalReminderRequestedAt
+  if (!requestedAt || data.renewalReminder?.requestedAt === requestedAt) return
+  try {
+    await docSnap.ref.update(
+      { renewalReminder: { status: "sending", requestedAt, at: new Date().toISOString() } },
+      { lastUpdateTime: docSnap.updateTime }
+    )
+  } catch {
+    return
+  }
+  let status
+  try {
+    status = await sendRenewalReminder(collectionName, docSnap.id, data)
+  } catch (err) {
+    console.error(`Renewal reminder failed for ${collectionName}/${docSnap.id}:`, err)
+    status = "failed"
+  }
+  await docSnap.ref.update({ renewalReminder: { status, requestedAt, at: new Date().toISOString() } })
+    .catch((err) => console.error("Could not record renewal reminder status:", err))
+}
+
+async function sendRenewalReminder(collectionName, id, data) {
+  const phone = toWhatsAppId(data.customerPhone)
+  if (!phone) return "invalid_phone"
+  const planId = subscriptionPlanId(data)
+  const price = monthlyPrice(planId)
+  if (!price) return "no_price"
+  if (!PUBLIC_BASE_URL) {
+    console.error("PUBLIC_BASE_URL is not set, so renewal links can't be made.")
+    return "failed"
+  }
+  // Short random token in the link; the subscription is looked up from it.
+  const token = crypto.randomBytes(9).toString("base64url")
+  await db.collection("renewals").doc(token).set({ collection: collectionName, id, customerPhone: phone, createdAt: new Date().toISOString() })
+  const url = `${PUBLIC_BASE_URL}/renew/${token}`
+  const name = String(data.customerName || "").trim() || "there"
+  const plan = subscriptionPlanText(planId).label
+  const when = renewalWhen(data.paidUntil)
+  return notifyCustomer(
+    phone,
+    TEMPLATE_RENEWAL,
+    [name, plan, when, `${naira(price)}/month`],
+    [
+      `\u{1F514} *Time to renew your WasteCore subscription*`,
+      "",
+      `Hello ${name}, your *${plan}* subscription ${when}.`,
+      "",
+      `Renew for *${naira(price)}/month* to keep your pickups going. Tap *Renew now* to pay securely by card, bank transfer or USSD.`,
+    ].join("\n"),
+    { urlButtonParam: token, fallbackButton: { text: "Renew now", url } }
+  )
+}
+
+// Creates the Paystack payment for a renewal link. Returns the checkout URL,
+// or null if Paystack isn't set up or couldn't be reached.
+async function createRenewalPayment(renewal, target) {
+  if (!paystackEnabled()) return null
+  const planId = subscriptionPlanId(target)
+  const amount = monthlyPrice(planId)
+  if (!amount) return null
+  const reference = newPaymentReference()
+  await db.collection("pendingPayments").doc(reference).set({
+    kind: "renewal",
+    target: { collection: renewal.collection, id: renewal.id },
+    amount,
+    months: 1,
+    planId,
+    customerPhone: renewal.customerPhone,
+    status: "pending",
+    createdAt: new Date().toISOString(),
+  })
+  const url = await initializePaystack(reference, amount, renewal.customerPhone, `${subscriptionPlanText(planId).label} renewal (1 month)`)
+  if (!url) await db.collection("pendingPayments").doc(reference).update({ status: "init_failed" }).catch(() => {})
+  return url
 }
 
 // ================= COLLECTORS =================
@@ -698,6 +856,8 @@ function setupSubscriberWelcome() {
     (snapshot) => {
       snapshot.docChanges().forEach(async (change) => {
         if (change.type === "removed") return
+        await sendRenewalReminderIfRequested("subscribers", change.doc)
+          .catch((err) => console.error(`Renewal reminder failed for subscribers/${change.doc.id}:`, err))
         const data = change.doc.data()
         if (data.sendWhatsAppConfirmation !== true || data.whatsAppConfirmation || data.status !== "active") return
         try {
@@ -1086,7 +1246,6 @@ function newPaymentReference() {
 // transfer).
 async function createPaystackPayment(checkout, from) {
   const reference = newPaymentReference()
-  const phoneDigits = normalizePhone(from).replace(/\D/g, "")
   try {
     await db.collection("pendingPayments").doc(reference).set({
       collection: checkout.collection,
@@ -1097,19 +1256,32 @@ async function createPaystackPayment(checkout, from) {
       status: "pending",
       createdAt: new Date().toISOString(),
     })
+    const url = await initializePaystack(reference, checkout.amount, from, checkout.description)
+    if (!url) await db.collection("pendingPayments").doc(reference).update({ status: "init_failed" }).catch(() => {})
+    return url
+  } catch (err) {
+    console.error("Could not save the pending payment:", err.message)
+    return null
+  }
+}
+
+// Starts a Paystack transaction and returns its checkout URL (or null).
+async function initializePaystack(reference, amount, from, description) {
+  const phoneDigits = normalizePhone(from).replace(/\D/g, "")
+  try {
     const res = await axios.post(
       `${PAYSTACK_API}/transaction/initialize`,
       {
         // Paystack requires an email; WhatsApp customers don't give one.
         email: `${phoneDigits}@${PAYSTACK_EMAIL_DOMAIN}`,
-        amount: Math.round(checkout.amount * 100), // kobo
+        amount: Math.round(amount * 100), // kobo
         currency: "NGN",
         reference,
         ...(PUBLIC_BASE_URL ? { callback_url: `${PUBLIC_BASE_URL}/paystack/callback` } : {}),
         metadata: {
           customerPhone: normalizePhone(from),
           custom_fields: [
-            { display_name: "Service", variable_name: "service", value: checkout.description },
+            { display_name: "Service", variable_name: "service", value: description },
             { display_name: "WhatsApp", variable_name: "whatsapp", value: normalizePhone(from) },
           ],
         },
@@ -1119,7 +1291,6 @@ async function createPaystackPayment(checkout, from) {
     return res.data?.data?.authorization_url || null
   } catch (err) {
     console.error("Paystack initialize failed:", err.response?.data || err.message)
-    await db.collection("pendingPayments").doc(reference).update({ status: "init_failed" }).catch(() => {})
     return null
   }
 }
@@ -1137,6 +1308,32 @@ async function finalizePaystackPayment(reference, paidKobo, channel, customerPho
       t.update(pendingRef, { status: "amount_mismatch", paidKobo: Number(paidKobo), updatedAt: new Date().toISOString() })
       return { outcome: "amount_mismatch", p }
     }
+    const today = lagosToday()
+    const payment = { date: today, amount: p.amount, method: "paystack", reference, months: p.months || 1 }
+
+    // Renewal: extend the subscription from its current paid-until date (or
+    // today, if it has already run out).
+    if (p.kind === "renewal") {
+      const targetRef = db.collection(p.target.collection).doc(p.target.id)
+      const targetSnap = await t.get(targetRef)
+      if (!targetSnap.exists) {
+        t.update(pendingRef, { status: "paid", note: "subscription not found", paidAt: new Date().toISOString() })
+        return { outcome: "created", p, renewal: { missing: true } }
+      }
+      const current = targetSnap.data()
+      const periodStart = laterDate(current.paidUntil, today)
+      const paidUntil = addMonthsIso(periodStart, p.months || 1)
+      t.update(targetRef, {
+        lastPaymentDate: today,
+        lastPaymentAmount: p.amount,
+        lastPaymentMethod: "paystack",
+        paidUntil,
+        payments: [...(current.payments || []), payment].slice(-36),
+        updatedAt: new Date().toISOString(),
+      })
+      t.update(pendingRef, { status: "paid", paidAt: new Date().toISOString() })
+      return { outcome: "created", p, renewal: { current, periodStart, paidUntil } }
+    }
     // A link paid days later can carry a pickup/start date that has passed.
     // The money is real, so the booking is still made, flagged for the team
     // to agree a new date with the customer.
@@ -1150,12 +1347,22 @@ async function finalizePaystackPayment(reference, paidKobo, channel, customerPho
       paymentStatus: "paid",
       paidAt: new Date().toISOString(),
       ...(datePassed ? { needsReschedule: true } : {}),
+      // Monthly plans: first month paid from the start date.
+      ...(p.collection === "upgradeRequests" ? {
+        lastPaymentDate: today,
+        lastPaymentAmount: p.amount,
+        lastPaymentMethod: "paystack",
+        paidUntil: addMonthsIso(laterDate(p.doc?.startDate, today), 1),
+        payments: [payment],
+      } : {}),
     }))
     t.update(pendingRef, { status: "paid", bookingCollection: p.collection, bookingId: bookingRef.id, paidAt: new Date().toISOString() })
     return { outcome: "created", p, datePassed, bookedDate }
   })
 
-  if (result.outcome === "created") {
+  if (result.outcome === "created" && result.renewal) {
+    await confirmRenewal(result.p, result.renewal)
+  } else if (result.outcome === "created") {
     const message = result.datePassed
       ? `${result.p.confirmation}\n\n\u26A0\uFE0F The date you chose (${displayDate(result.bookedDate)}) has already passed, ` +
         `so our team will contact you to agree a new date.`
@@ -1169,6 +1376,33 @@ async function finalizePaystackPayment(reference, paidKobo, channel, customerPho
       "We received a payment that doesn't match your booking total. Our team will contact you shortly.")
   }
   return result.outcome
+}
+
+// Thanks the customer for a renewal and confirms the new paid-until date.
+async function confirmRenewal(p, renewal) {
+  if (renewal.missing) {
+    console.error(`Renewal paid for a subscription that no longer exists (${p.target.collection}/${p.target.id})`)
+    await reportUnmatchedPayment(`renewal-${p.target.id}`, Math.round(p.amount * 100), normalizePhone(p.customerPhone))
+    return
+  }
+  const data = renewal.current
+  const name = String(data.customerName || "").trim() || "there"
+  const plan = subscriptionPlanText(p.planId).label
+  const days = Array.isArray(data.pickupDays) ? data.pickupDays : []
+  const time = SUBSCRIPTION_TIME_WINDOWS[data.timeWindow]
+  const schedule = days.length ? `${joinDays(days)}${time ? `, ${time}` : ""}` : "as scheduled"
+  await notifyCustomer(
+    p.customerPhone,
+    TEMPLATE_SUBSCRIPTION,
+    [name, plan, schedule, displayDate(renewal.periodStart)],
+    [
+      `\u2705 *Subscription renewed!*`,
+      "",
+      `Thank you, ${name}. Your *${plan}* subscription is paid until *${displayDate(renewal.paidUntil)}*.`,
+      `\u{1F5D3} Pickups: ${schedule}`,
+      `\u{1F4B0} Paid: ${naira(p.amount)}`,
+    ].join("\n")
+  )
 }
 
 // A bot payment whose booking record is gone (e.g. a link paid long after
@@ -1228,7 +1462,10 @@ async function cleanUpOldRecords() {
     const messages = await deleteOlderThan("processedMessages", "processedAt", 3)
     // Paid links are kept: they link a Paystack payment to its booking.
     const links = await deleteOlderThan("pendingPayments", "createdAt", 30, (p) => p.status === "paid" || p.status === "amount_mismatch")
-    if (messages || links) console.log(`Cleanup: removed ${messages} old message markers, ${links} unpaid payment links`)
+    const renewals = await deleteOlderThan("renewals", "createdAt", 90)
+    if (messages || links || renewals) {
+      console.log(`Cleanup: removed ${messages} old message markers, ${links} unpaid payment links, ${renewals} old renewal links`)
+    }
   } catch (err) {
     console.error("Cleanup failed:", err.message)
   }
@@ -2299,12 +2536,43 @@ nextApp.prepare().then(() => {
         console.error("Paystack verify failed:", err.response?.data || err.message)
       }
     }
-    const icon = paid ? "&#10003;" : "!"
-    const title = paid ? "Payment received" : "Payment not confirmed yet"
-    const body = paid
-      ? "Thank you! Your booking is confirmed and the details are on WhatsApp. You can close this page."
-      : "If you completed the payment, you'll get a WhatsApp confirmation shortly. Otherwise go back to WhatsApp and type <b>hi</b> to try again."
-    res.type("html").send(`<!doctype html><html lang="en"><head><meta charset="utf-8">
+    res.type("html").send(brandedPage({
+      ok: paid,
+      title: paid ? "Payment received" : "Payment not confirmed yet",
+      body: paid
+        ? "Thank you! Your payment is confirmed and the details are on WhatsApp. You can close this page."
+        : "If you completed the payment, you'll get a WhatsApp confirmation shortly. Otherwise go back to WhatsApp and type <b>hi</b> to try again.",
+    }))
+  })
+
+  // "Renew now" link from a renewal reminder: starts a fresh Paystack
+  // payment for the subscription's plan and sends the customer to it.
+  app.get("/renew/:token", async (req, res) => {
+    const page = (title, body) => res.type("html").send(brandedPage({ ok: false, title, body }))
+    try {
+      const snap = await db.collection("renewals").doc(String(req.params.token).slice(0, 64)).get()
+      if (!snap.exists) return page("Link not found", "This renewal link isn't valid. Message us on WhatsApp and we'll help you renew.")
+      const renewal = snap.data()
+      const target = await db.collection(renewal.collection).doc(renewal.id).get()
+      if (!target.exists) return page("Subscription not found", "We couldn't find this subscription. Message us on WhatsApp and we'll help you renew.")
+      const url = await createRenewalPayment(renewal, target.data())
+      if (url) return res.redirect(303, url)
+      const price = monthlyPrice(subscriptionPlanId(target.data()))
+      return page(
+        "Renew by bank transfer",
+        `${price ? `Pay <b>${naira(price)}</b> to:<br>` : "Pay to:<br>"}${BANK_DETAILS.replace(/\n/g, "<br>")}<br><br>` +
+        "Then send a photo of your receipt to us on WhatsApp."
+      )
+    } catch (err) {
+      console.error("Renewal link failed:", err)
+      return page("Something went wrong", "Please try again in a moment, or message us on WhatsApp.")
+    }
+  })
+
+  // Branded page shown after payment and for renewal links.
+  function brandedPage({ ok, title, body }) {
+    const icon = ok ? "&#10003;" : "!"
+    return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>WasteCore - ${title}</title>
 <style>
   body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
@@ -2313,7 +2581,7 @@ nextApp.prepare().then(() => {
     box-shadow:0 10px 30px rgba(23,48,29,.10)}
   .brand{font-weight:700;color:#2e8b3a;letter-spacing:.3px;margin-bottom:20px}
   .icon{width:64px;height:64px;border-radius:50%;margin:0 auto 16px;display:flex;align-items:center;justify-content:center;
-    font-size:32px;font-weight:700;color:#fff;background:${paid ? "#2e8b3a" : "#e0a100"}}
+    font-size:32px;font-weight:700;color:#fff;background:${ok ? "#2e8b3a" : "#e0a100"}}
   h1{font-size:22px;margin:0 0 8px}
   p{margin:0 0 24px;line-height:1.5;color:#41584a}
   a.btn{display:block;background:#25d366;color:#fff;text-decoration:none;font-weight:600;padding:14px;border-radius:12px}
@@ -2324,8 +2592,8 @@ nextApp.prepare().then(() => {
   <h1>${title}</h1>
   <p>${body}</p>
   <a class="btn" href="https://wa.me/${businessNumber()}">Back to WhatsApp</a>
-</main></body></html>`)
-  })
+</main></body></html>`
+  }
 
   // Pictures and videos for the "About WasteCore" option; WhatsApp fetches them by URL.
   app.use("/about", express.static(ABOUT_DIR, { maxAge: "1h" }))

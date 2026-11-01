@@ -57,12 +57,14 @@ import {
   Pencil,
   Phone,
   Play,
+  BellRing,
   Send,
+  Wallet,
   Trash2,
   UserPlus,
 } from "lucide-react"
 import { FirebaseService } from "@/lib/firebase-service"
-import type { SubscriberInput, SubscriberStatus, SubscriptionRow } from "@/lib/types"
+import type { PaymentInput, SubscriberInput, SubscriberStatus, SubscriptionRow } from "@/lib/types"
 import {
   SUBSCRIPTION_KINDS,
   SUBSCRIPTION_PLANS,
@@ -114,6 +116,63 @@ const WHATSAPP_STATUS: Record<string, { text: string; className: string; hint: s
   invalid_phone: { text: "Invalid WhatsApp number", className: "text-destructive", hint: "Edit the phone number, then use Send WhatsApp again." },
 }
 
+// ── Payments ────────────────────────────────────────────────────────────────
+const PAYMENT_METHODS = [
+  { id: "cash", label: "Cash" },
+  { id: "bank_transfer", label: "Bank transfer" },
+  { id: "pos", label: "POS" },
+  { id: "paystack", label: "Paystack" },
+  { id: "other", label: "Other" },
+]
+const EXPIRING_DAYS = 7
+
+// "2026-01-31" + 1 month -> "2026-02-28" (same rule as the bot).
+function addMonthsIso(iso: string, months: number): string {
+  const [y, m, d] = iso.slice(0, 10).split("-").map(Number)
+  const target = new Date(Date.UTC(y, m - 1 + months, 1))
+  const lastDay = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate()
+  target.setUTCDate(Math.min(d, lastDay))
+  return target.toISOString().slice(0, 10)
+}
+
+function daysBetween(fromIso: string, toIso: string): number {
+  return Math.round((Date.parse(`${toIso}T00:00:00Z`) - Date.parse(`${fromIso}T00:00:00Z`)) / 86_400_000)
+}
+
+function shortDate(iso: string): string {
+  const d = new Date(`${iso}T00:00:00`)
+  return isNaN(d.getTime()) ? iso : d.toLocaleDateString("en-NG", { day: "numeric", month: "short", year: "numeric" })
+}
+
+type PaymentState = "ok" | "expiring" | "expired" | "none" | "unverified" | "na"
+
+// Where a subscription stands on payment. Retired weekly plans aren't tracked.
+function paymentState(r: SubscriptionRow, today: string): { state: PaymentState; label: string; className: string } {
+  if (findPlan(r.planId)?.priceUnit !== "month") return { state: "na", label: "—", className: "text-muted-foreground" }
+  if (r.payment.receiptUnverified) return { state: "unverified", label: "Receipt not verified", className: "bg-gray-100 text-gray-700" }
+  const until = r.payment.paidUntil
+  if (!until) return { state: "none", label: "No payment recorded", className: "bg-gray-100 text-gray-700" }
+  const days = daysBetween(today, until)
+  if (days < 0) return { state: "expired", label: `Expired ${shortDate(until)}`, className: "bg-red-100 text-red-800" }
+  if (days <= EXPIRING_DAYS) {
+    return { state: "expiring", label: days === 0 ? "Expires today" : `Expires in ${days} day${days > 1 ? "s" : ""}`, className: "bg-amber-100 text-amber-800" }
+  }
+  return { state: "ok", label: `Paid until ${shortDate(until)}`, className: "bg-green-100 text-green-800" }
+}
+
+const REMINDER_STATUS: Record<string, { text: string; className: string; hint: string }> = {
+  sending: { text: "Sending reminder…", className: "text-muted-foreground", hint: "The bot is sending the renewal reminder." },
+  template: { text: "✓ Reminder sent", className: "text-green-700", hint: "Renewal reminder sent with a Renew now button." },
+  text: {
+    text: "Reminder sent as plain message",
+    className: "text-amber-700",
+    hint: "The approved template couldn't be used. It only arrives if the customer messaged the bot in the last 24 hours.",
+  },
+  failed: { text: "Reminder not sent", className: "text-destructive", hint: "The reminder could not be sent. Try again." },
+  invalid_phone: { text: "Invalid WhatsApp number", className: "text-destructive", hint: "Fix the phone number, then send again." },
+  no_price: { text: "No monthly price for this plan", className: "text-destructive", hint: "Retired plans can't be renewed by link." },
+}
+
 function todayIso(): string {
   const d = new Date()
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
@@ -140,6 +199,11 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
   const [formError, setFormError] = useState<string | null>(null)
   const [sendWhatsApp, setSendWhatsApp] = useState(true)
   const [deleting, setDeleting] = useState<SubscriptionRow | null>(null)
+  const [paymentFilter, setPaymentFilter] = useState<string>(ALL)
+  const [payingRow, setPayingRow] = useState<SubscriptionRow | null>(null)
+  const [paymentForm, setPaymentForm] = useState<PaymentInput>({ date: "", amount: 0, method: "cash", months: 1, paidUntil: "" })
+  const [paymentError, setPaymentError] = useState<string | null>(null)
+  const [remindOpen, setRemindOpen] = useState(false)
 
   useEffect(() => {
     return FirebaseService.subscribeToSubscriptions(
@@ -151,9 +215,11 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
   const query = searchQuery.trim().toLowerCase()
   const todayName = WEEK_DAYS[(new Date().getDay() + 6) % 7]
 
+  const today = todayIso()
   const kindRows = rows.filter((r) => r.kind === kind)
   const visibleRows = kindRows.filter((r) => {
     if (statusFilter !== ALL && r.status !== statusFilter) return false
+    if (paymentFilter !== ALL && paymentState(r, today).state !== paymentFilter) return false
     if (!query) return true
     return `${r.customerName} ${r.customerPhone} ${r.address} ${r.wasteType}`.toLowerCase().includes(query)
   })
@@ -165,8 +231,16 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
       household: active.filter((r) => r.kind === "household").length,
       today: active.filter((r) => r.pickupDays.includes(todayName)).length,
       unscheduled: active.filter((r) => r.source === "whatsapp").length,
+      expiring: active.filter((r) => paymentState(r, today).state === "expiring").length,
+      expired: active.filter((r) => paymentState(r, today).state === "expired").length,
     }
-  }, [rows, todayName])
+  }, [rows, todayName, today])
+
+  // Active subscriptions in this tab that are expiring or expired.
+  const dueRows = kindRows.filter((r) => {
+    const st = paymentState(r, today).state
+    return r.status === "active" && (st === "expiring" || st === "expired")
+  })
 
   // ── Form ──────────────────────────────────────────────────────────────────
   const openCreate = () => {
@@ -249,7 +323,11 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
     setFormOpen(false)
     const ok = editingId
       ? await FirebaseService.updateSubscriber(editingId, input)
-      : await FirebaseService.createSubscriber(input, sendWhatsApp)
+      : await FirebaseService.createSubscriber(
+        input,
+        sendWhatsApp,
+        rows.find((r) => r.source === "whatsapp" && r.id === input.linkedRequestId)?.payment
+      )
     if (!ok) setError(`Could not save ${input.customerName}. Please try again.`)
   }
 
@@ -259,9 +337,54 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
   }
 
   const setStatus = async (row: SubscriptionRow, status: SubscriberStatus) => {
-    const { id, source, collection, kind: _k, requestStatus, whatsAppConfirmation, createdAt, ...input } = row
-    const ok = await FirebaseService.updateSubscriber(id, { ...input, status })
+    const ok = await FirebaseService.setSubscriberStatus(row.id, status)
     if (!ok) setError("Could not update the status. Please try again.")
+  }
+
+  // ── Payments & renewals ───────────────────────────────────────────────────
+  // A payment made before the current period ends extends it; otherwise the
+  // new period starts on the payment date.
+  const paidUntilFor = (row: SubscriptionRow, date: string, months: number) => {
+    const current = row.payment.paidUntil
+    return addMonthsIso(current && current > date ? current : date, months)
+  }
+
+  const openPayment = (row: SubscriptionRow) => {
+    const date = todayIso()
+    setPayingRow(row)
+    setPaymentForm({ date, amount: findPlan(row.planId)?.price ?? 0, method: "cash", months: 1, paidUntil: paidUntilFor(row, date, 1) })
+    setPaymentError(null)
+  }
+
+  const updatePaymentForm = (changes: Partial<PaymentInput>) => {
+    setPaymentForm((f) => {
+      const next = { ...f, ...changes }
+      // Keep the paid-until date in step unless it's being edited directly.
+      if (payingRow && ("date" in changes || "months" in changes) && next.date) {
+        next.paidUntil = paidUntilFor(payingRow, next.date, next.months || 1)
+        if ("months" in changes) next.amount = (findPlan(payingRow.planId)?.price ?? 0) * (next.months || 1)
+      }
+      return next
+    })
+  }
+
+  const savePayment = async () => {
+    if (!payingRow) return
+    if (!paymentForm.date) return setPaymentError("Choose the payment date.")
+    if (!(paymentForm.amount > 0)) return setPaymentError("Enter the amount paid.")
+    if (!paymentForm.paidUntil || paymentForm.paidUntil <= paymentForm.date) {
+      return setPaymentError("Paid until must be after the payment date.")
+    }
+    const row = payingRow
+    setPayingRow(null)
+    const ok = await FirebaseService.recordSubscriptionPayment(row, paymentForm)
+    if (!ok) setError(`Could not record the payment for ${row.customerName}. Please try again.`)
+  }
+
+  const sendReminders = async (targets: SubscriptionRow[]) => {
+    if (!targets.length) return
+    const ok = await FirebaseService.requestRenewalReminders(targets)
+    if (!ok) setError("Could not send the renewal reminders. Please try again.")
   }
 
   const handleDelete = async () => {
@@ -301,11 +424,17 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
         </div>
       )}
 
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 md:gap-4">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 md:gap-4 xl:grid-cols-6">
         <SummaryCard label="Active business" value={stats.business} />
         <SummaryCard label="Active household" value={stats.household} />
         <SummaryCard label={`Pickups today (${todayName})`} value={stats.today} />
         <SummaryCard label="Need a schedule" value={stats.unscheduled} hint="WhatsApp bookings" />
+        <button type="button" className="text-left" onClick={() => setPaymentFilter("expiring")}>
+          <SummaryCard label="Expiring soon" value={stats.expiring} hint={`Within ${EXPIRING_DAYS} days`} />
+        </button>
+        <button type="button" className="text-left" onClick={() => setPaymentFilter("expired")}>
+          <SummaryCard label="Expired" value={stats.expired} hint="Payment overdue" />
+        </button>
       </div>
 
       <Card>
@@ -332,6 +461,24 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
                   <SelectItem value="cancelled">Cancelled</SelectItem>
                 </SelectContent>
               </Select>
+              <Select value={paymentFilter} onValueChange={setPaymentFilter}>
+                <SelectTrigger className="w-44">
+                  <SelectValue placeholder="Payment" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={ALL}>All payments</SelectItem>
+                  <SelectItem value="ok">Paid up</SelectItem>
+                  <SelectItem value="expiring">Expiring soon</SelectItem>
+                  <SelectItem value="expired">Expired</SelectItem>
+                  <SelectItem value="none">No payment recorded</SelectItem>
+                  <SelectItem value="unverified">Receipt not verified</SelectItem>
+                </SelectContent>
+              </Select>
+              {dueRows.length > 0 && (
+                <Button size="sm" variant="outline" className="h-9" onClick={() => setRemindOpen(true)}>
+                  <BellRing className="mr-2 h-4 w-4" /> Remind {dueRows.length} to renew
+                </Button>
+              )}
               <Button size="sm" className="h-9" onClick={openCreate}>
                 <UserPlus className="mr-2 h-4 w-4" /> Register subscriber
               </Button>
@@ -348,6 +495,7 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
                 <TableHead>Schedule</TableHead>
                 <TableHead>Next pickup</TableHead>
                 <TableHead>Status</TableHead>
+                <TableHead>Payment</TableHead>
                 <TableHead>Actions</TableHead>
               </TableRow>
             </TableHeader>
@@ -413,10 +561,56 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
                       </div>
                     </TableCell>
                     <TableCell>
+                      {(() => {
+                        const pay = paymentState(r, today)
+                        const reminder = r.renewalReminder ? REMINDER_STATUS[r.renewalReminder.status] : undefined
+                        return (
+                          <div className="flex flex-col items-start gap-1">
+                            {pay.state === "na" ? (
+                              <span className="text-sm text-muted-foreground">—</span>
+                            ) : (
+                              <Badge className={pay.className}>{pay.label}</Badge>
+                            )}
+                            {r.payment.lastPaymentDate && (
+                              <span className="text-[11px] text-muted-foreground">
+                                Last paid {shortDate(r.payment.lastPaymentDate)}
+                                {r.payment.lastPaymentMethod ? ` · ${PAYMENT_METHODS.find((m) => m.id === r.payment.lastPaymentMethod)?.label ?? r.payment.lastPaymentMethod}` : ""}
+                              </span>
+                            )}
+                            {reminder && (
+                              <span className={cn("text-[11px]", reminder.className)} title={reminder.hint}>{reminder.text}</span>
+                            )}
+                          </div>
+                        )
+                      })()}
+                    </TableCell>
+                    <TableCell>
                       {r.source === "whatsapp" ? (
-                        <Button variant="outline" size="sm" onClick={() => openEdit(r)}>
-                          <CalendarClock className="mr-1 h-4 w-4" /> Set schedule
-                        </Button>
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button variant="outline" size="sm" aria-label={`Actions for ${r.customerName}`}>
+                              <MoreHorizontal className="h-4 w-4" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuItem onClick={() => openEdit(r)}>
+                              <CalendarClock className="mr-2 h-4 w-4" /> Set schedule
+                            </DropdownMenuItem>
+                            {paymentState(r, today).state !== "na" && (
+                              <>
+                                <DropdownMenuItem onClick={() => openPayment(r)}>
+                                  <Wallet className="mr-2 h-4 w-4" /> Record payment
+                                </DropdownMenuItem>
+                                <DropdownMenuItem
+                                  disabled={r.renewalReminder?.status === "sending"}
+                                  onClick={() => sendReminders([r])}
+                                >
+                                  <BellRing className="mr-2 h-4 w-4" /> Send renewal reminder
+                                </DropdownMenuItem>
+                              </>
+                            )}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
                       ) : (
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
@@ -428,6 +622,19 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
                             <DropdownMenuItem onClick={() => openEdit(r)}>
                               <Pencil className="mr-2 h-4 w-4" /> Edit
                             </DropdownMenuItem>
+                            {paymentState(r, today).state !== "na" && (
+                              <>
+                                <DropdownMenuItem onClick={() => openPayment(r)}>
+                                  <Wallet className="mr-2 h-4 w-4" /> Record payment
+                                </DropdownMenuItem>
+                                <DropdownMenuItem
+                                  disabled={r.renewalReminder?.status === "sending"}
+                                  onClick={() => sendReminders([r])}
+                                >
+                                  <BellRing className="mr-2 h-4 w-4" /> Send renewal reminder
+                                </DropdownMenuItem>
+                              </>
+                            )}
                             {r.status === "active" && r.whatsAppConfirmation?.status !== "sending" && (
                               <DropdownMenuItem onClick={() => resendWhatsApp(r)}>
                                 <Send className="mr-2 h-4 w-4" />
@@ -630,6 +837,88 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
           </form>
         </DialogContent>
       </Dialog>
+
+      {/* ── Record payment ─────────────────────────────────────────────────── */}
+      <Dialog open={!!payingRow} onOpenChange={(open) => { if (!open) setPayingRow(null) }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Record payment</DialogTitle>
+            <DialogDescription>
+              {payingRow?.customerName}
+              {payingRow?.payment.paidUntil ? ` · currently paid until ${shortDate(payingRow.payment.paidUntil)}` : " · no payment recorded yet"}
+            </DialogDescription>
+          </DialogHeader>
+          <form className="space-y-4" onSubmit={(e) => { e.preventDefault(); savePayment() }}>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="pay-date">Payment date</Label>
+                <Input id="pay-date" type="date" value={paymentForm.date}
+                  onChange={(e) => updatePaymentForm({ date: e.target.value })} />
+              </div>
+              <div className="space-y-2">
+                <Label>Months paid</Label>
+                <Select value={String(paymentForm.months)} onValueChange={(v) => updatePaymentForm({ months: Number(v) })}>
+                  <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {[1, 2, 3, 6, 12].map((n) => <SelectItem key={n} value={String(n)}>{n} month{n > 1 ? "s" : ""}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="pay-amount">Amount (NGN)</Label>
+                <Input id="pay-amount" type="number" min={0} inputMode="numeric" value={paymentForm.amount || ""}
+                  onChange={(e) => updatePaymentForm({ amount: Number(e.target.value) })} />
+              </div>
+              <div className="space-y-2">
+                <Label>Method</Label>
+                <Select value={paymentForm.method} onValueChange={(v) => updatePaymentForm({ method: v })}>
+                  <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {PAYMENT_METHODS.map((m) => <SelectItem key={m.id} value={m.id}>{m.label}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="pay-until">Paid until</Label>
+              <Input id="pay-until" type="date" value={paymentForm.paidUntil}
+                onChange={(e) => updatePaymentForm({ paidUntil: e.target.value })} />
+              <p className="text-xs text-muted-foreground">
+                The date the next payment is due. Worked out from the current paid-until date and months paid; change it if needed.
+              </p>
+            </div>
+            {paymentError && <p className="text-sm text-destructive">{paymentError}</p>}
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setPayingRow(null)}>Cancel</Button>
+              <Button type="submit">Save payment</Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Bulk renewal reminders ─────────────────────────────────────────── */}
+      <AlertDialog open={remindOpen} onOpenChange={setRemindOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Send {dueRows.length} renewal reminder{dueRows.length === 1 ? "" : "s"}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Each {kind} subscriber below gets a WhatsApp message with a Renew now button to pay for another month.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <ul className="max-h-48 space-y-1 overflow-y-auto text-sm">
+            {dueRows.map((r) => (
+              <li key={`${r.collection}_${r.id}`} className="flex justify-between gap-2">
+                <span className="truncate">{r.customerName || r.customerPhone}</span>
+                <span className="shrink-0 text-muted-foreground">{paymentState(r, today).label}</span>
+              </li>
+            ))}
+          </ul>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={() => sendReminders(dueRows)}>Send reminders</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog open={!!deleting} onOpenChange={(open) => { if (!open) setDeleting(null) }}>
         <AlertDialogContent>
