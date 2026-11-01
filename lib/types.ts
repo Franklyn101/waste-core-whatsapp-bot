@@ -100,5 +100,27 @@ export interface SubscriptionRow extends SubscriberInput {
   // Outcome of the WhatsApp confirmation the bot sends to a subscriber added
   // on the dashboard: sending, template, text, failed or invalid_phone.
   whatsAppConfirmation?: { status: string; at?: string } | null
+  // Monthly payments. paidUntil is the date the next payment is due; the
+  // bot sets these for WhatsApp payments, admins record the rest.
+  payment: SubscriptionPayment
+  // Outcome of the last "Send renewal reminder".
+  renewalReminder?: { status: string; at?: string; requestedAt?: string } | null
   createdAt: Date
+}
+
+export interface SubscriptionPayment {
+  paidUntil: string | null
+  lastPaymentDate: string | null
+  lastPaymentAmount: number | null
+  lastPaymentMethod: string | null
+  // WhatsApp bank-transfer receipt not yet verified by an admin.
+  receiptUnverified: boolean
+}
+
+export interface PaymentInput {
+  date: string
+  amount: number
+  method: string
+  months: number
+  paidUntil: string
 }
