@@ -49,7 +49,7 @@ const navigationItems = [
   },
   {
     id: "users",
-    label: "User Data",
+    label: "Customers",
     icon: Users,
   },
   {

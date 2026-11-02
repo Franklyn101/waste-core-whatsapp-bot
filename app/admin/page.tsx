@@ -5,7 +5,6 @@ import { DashboardSidebar } from "@/components/dashboard-sidebar"
 import { DashboardHeader } from "@/components/dashboard-header"
 import { DashboardStatsCards } from "@/components/dashboard-stats"
 import { PickupRequestsTable } from "@/components/pickup-requests-table"
-import { UsersTable } from "@/components/users-table"
 import { PaymentReceiptsGallery } from "@/components/payment-receipts-gallery"
 import { AnalyticsCharts } from "@/components/analytics-charts"
 import { LocalTestingPanel } from "@/components/local-testing-panel"
@@ -23,6 +22,7 @@ import { AdminAuthProvider, useAdminAuth } from "@/lib/admin-auth"
 import { Toaster } from "@/components/ui/sonner"
 import { RevenueReports } from "@/components/revenue-reports"
 import { ActivityLog } from "@/components/activity-log"
+import { CustomersManager } from "@/components/customers-manager"
 import { can } from "@/lib/permissions"
 
 
@@ -104,10 +104,10 @@ function DashboardPage() {
         return (
           <div className="space-y-6">
             <div>
-              <h1 className="text-2xl md:text-3xl font-bold text-balance">User Data</h1>
-              <p className="text-muted-foreground mt-2">View customer information and request history.</p>
+              <h1 className="text-2xl md:text-3xl font-bold text-balance">Customers</h1>
+              <p className="text-muted-foreground mt-2">Every customer with their bookings, payments, tickets, ratings and your notes. Tap a customer for their full history.</p>
             </div>
-            <UsersTable searchQuery={searchQuery} />
+            <CustomersManager searchQuery={searchQuery} />
           </div>
         )
 
