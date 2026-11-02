@@ -59,10 +59,12 @@ import {
   Pencil,
   Phone,
   Trash2,
+  TrendingUp,
   UserPlus,
   Users,
 } from "lucide-react"
 import { FirebaseService } from "@/lib/firebase-service"
+import { CollectorPerformance } from "@/components/collector-performance"
 import { useAdminAuth } from "@/lib/admin-auth"
 import { can } from "@/lib/permissions"
 import { WEEK_DAYS, findPlan, planFullLabel } from "@/lib/subscriptions"
@@ -511,6 +513,9 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
           <TabsTrigger value="pickups">
             <ClipboardList className="w-4 h-4 mr-2" /> Assign Pickups
           </TabsTrigger>
+          <TabsTrigger value="performance">
+            <TrendingUp className="w-4 h-4 mr-2" /> Performance
+          </TabsTrigger>
         </TabsList>
 
         {/* ── Collectors list ─────────────────────────────────────────────── */}
@@ -755,6 +760,9 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
               )}
             </CardContent>
           </Card>
+        </TabsContent>
+        <TabsContent value="performance">
+          <CollectorPerformance collectors={collectors} jobs={[...pickups, ...visits]} />
         </TabsContent>
       </Tabs>
 
