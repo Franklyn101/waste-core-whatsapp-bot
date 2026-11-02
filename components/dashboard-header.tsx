@@ -11,16 +11,18 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { Bell, LogOut, Menu, Search, Settings } from "lucide-react"
+import { LogOut, Menu, Search, Settings } from "lucide-react"
 import { useAdminAuth } from "@/lib/admin-auth"
+import { NotificationsBell } from "@/components/notifications-bell"
 
 interface DashboardHeaderProps {
   searchQuery: string
   onSearchChange: (query: string) => void
   onMenuClick?: () => void
+  onNavigate: (section: string) => void
 }
 
-export function DashboardHeader({ searchQuery, onSearchChange, onMenuClick }: DashboardHeaderProps) {
+export function DashboardHeader({ searchQuery, onSearchChange, onMenuClick, onNavigate }: DashboardHeaderProps) {
   const { profile, signOut } = useAdminAuth()
   const initials = (profile?.username ?? "ad").slice(0, 2).toUpperCase()
 
@@ -53,9 +55,7 @@ export function DashboardHeader({ searchQuery, onSearchChange, onMenuClick }: Da
 
       {/* Header Actions */}
       <div className="flex items-center gap-1 md:gap-4 shrink-0 md:ml-auto">
-        <Button variant="ghost" size="sm" className="hidden sm:inline-flex text-muted-foreground">
-          <Bell className="w-5 h-5" />
-        </Button>
+        <NotificationsBell onNavigate={onNavigate} />
         <Button variant="ghost" size="sm" className="hidden sm:inline-flex text-muted-foreground">
           <Settings className="w-5 h-5" />
         </Button>

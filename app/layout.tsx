@@ -9,6 +9,10 @@ export const metadata: Metadata = {
   title: 'WasteCore',
   description: 'WasteCore admin dashboard',
   generator: 'WasteCore',
+  // Lets admins install the dashboard (needed for notifications on iPhone).
+  manifest: '/manifest.webmanifest',
+  appleWebApp: { capable: true, title: 'WasteCore', statusBarStyle: 'default' },
+  icons: { icon: '/icons/icon-192.png', apple: '/icons/apple-touch-icon.png' },
 }
 
 export default function RootLayout({

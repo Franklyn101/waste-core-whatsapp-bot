@@ -7,6 +7,7 @@ const admin = require("firebase-admin")
 const { v2: cloudinary } = require("cloudinary")
 const axios = require("axios")
 const crypto = require("crypto")
+const webpush = require("web-push")
 
 // ================= NEXT.JS =================
 const dev = process.env.NODE_ENV !== "production"
@@ -347,11 +348,21 @@ const paymentVerified = (data) => data.paymentMethod === "paystack" || data.paym
 
 function setupStatusListeners() {
   const handleChanges = (collectionName) => {
+    // The first snapshot lists every existing document; only documents
+    // added after it are new activity for the admins.
+    let initialLoad = true
     db.collection(collectionName).onSnapshot(
       (snapshot) => {
+        const isInitial = initialLoad
+        initialLoad = false
         snapshot.docChanges().forEach(async (change) => {
          try {
           const data = change.doc.data()
+
+          if (change.type === "added" && !isInitial) {
+            const alert = newActivityAlert(collectionName, change.doc.id, data)
+            if (alert) await notifyAdmins(alert)
+          }
 
           // A collector was (re)assigned on the dashboard: message them.
           if (change.type !== "removed" && COLLECTOR_COLLECTIONS.includes(collectionName)) {
@@ -807,9 +818,161 @@ async function sendCollectorSummaries() {
 }
 
 function setupCollectorSummaries() {
-  const run = () => sendCollectorSummaries().catch((err) => console.error("Collector summary failed:", err))
+  const run = () => {
+    sendCollectorSummaries().catch((err) => console.error("Collector summary failed:", err))
+    sendAdminDigest().catch((err) => console.error("Admin digest failed:", err))
+  }
   run()
   setInterval(run, 10 * 60 * 1000).unref()
+}
+
+// ================= ADMIN NOTIFICATIONS =================
+// Activity worth an admin's attention is saved in `notifications` (the
+// dashboard's bell reads it live) and pushed to every device where an
+// admin turned on notifications, so they hear about it with the dashboard
+// closed. Push uses the Web Push standard (VAPID keys): set VAPID_PUBLIC_KEY
+// and VAPID_PRIVATE_KEY, or keys are generated once and kept in
+// config/webPush.
+let webPushReady = null
+
+function webPushKeys() {
+  if (!webPushReady) {
+    webPushReady = (async () => {
+      let publicKey = process.env.VAPID_PUBLIC_KEY
+      let privateKey = process.env.VAPID_PRIVATE_KEY
+      if (!publicKey || !privateKey) {
+        const ref = db.collection("config").doc("webPush")
+        const snap = await ref.get()
+        if (snap.exists && snap.data().publicKey) {
+          ({ publicKey, privateKey } = snap.data())
+        } else {
+          const keys = webpush.generateVAPIDKeys()
+          try {
+            await ref.create({ ...keys, createdAt: new Date().toISOString() })
+            ;({ publicKey, privateKey } = keys)
+          } catch {
+            ({ publicKey, privateKey } = (await ref.get()).data()) // another instance made them first
+          }
+        }
+      }
+      const subject = process.env.VAPID_SUBJECT || PUBLIC_BASE_URL || "mailto:admin@wastecore.ng"
+      webpush.setVapidDetails(subject, publicKey, privateKey)
+      return { publicKey }
+    })().catch((err) => {
+      console.error("Web push setup failed:", err.message)
+      webPushReady = null
+      return null
+    })
+  }
+  return webPushReady
+}
+
+// Pushes to every device of every active admin (or only `uid`'s devices).
+async function sendAdminPush(payload, uid) {
+  if (!(await webPushKeys())) return 0
+  const [subs, admins] = await Promise.all([
+    db.collection("pushSubscriptions").get(),
+    db.collection("admins").get(),
+  ])
+  const active = new Set(admins.docs.filter((d) => d.data().active !== false).map((d) => d.id))
+  let sent = 0
+  await Promise.all(subs.docs.map(async (d) => {
+    const sub = d.data()
+    if (!active.has(sub.uid) || (uid && sub.uid !== uid)) return
+    try {
+      await webpush.sendNotification(sub.subscription, JSON.stringify(payload), { TTL: 24 * 60 * 60, urgency: "high" })
+      sent++
+    } catch (err) {
+      // 404/410: the device unsubscribed or the browser data was cleared.
+      if (err.statusCode === 404 || err.statusCode === 410) await d.ref.delete().catch(() => {})
+      else console.error("Push to an admin device failed:", err.statusCode || err.message)
+    }
+  }))
+  return sent
+}
+
+// Saves one notification (once per `key`) and pushes it to admins.
+// `section` is the dashboard page it opens.
+async function notifyAdmins({ key, type, title, body, section }) {
+  try {
+    const ref = key ? db.collection("notifications").doc(String(key).replace(/\//g, "_").slice(0, 300)) : db.collection("notifications").doc()
+    try {
+      await ref.create({ type, title, body, section, createdAt: new Date().toISOString() })
+    } catch (err) {
+      if (err.code === 6) return // already notified
+      throw err
+    }
+    await sendAdminPush({ title, body, section, tag: ref.id })
+  } catch (err) {
+    console.error("Admin notification failed:", err.message)
+  }
+}
+
+// What a new booking/request/ticket looks like as a notification.
+function newActivityAlert(collectionName, id, data) {
+  // Bookings made while the server was down are older; don't alert late.
+  if (data.createdAt && Date.now() - Date.parse(data.createdAt) > 15 * 60 * 1000) return null
+  const name = data.customerName || normalizePhone(data.customerPhone || "") || "A customer"
+  const paid = data.paymentMethod === "paystack" ? ` · ${naira(data.totalAmount ?? 0)} paid (Paystack)`
+    : data.paymentReceiptUrl ? " · receipt sent, verify payment" : ""
+  const key = `new_${collectionName}_${id}`
+  switch (collectionName) {
+    case "instantPickups":
+      return { key, type: "booking", section: "instant-pickups", title: "New instant pickup",
+        body: `${name} · ${data.bagCount ? bagsText(data.bagCount) : "pickup"}${data.pickupDate ? ` · ${displayDate(data.pickupDate)}` : ""}${paid}` }
+    case "pickupRequests":
+      return { key, type: "booking", section: "pickup-requests", title: "New scheduled pickup",
+        body: `${name}${data.pickupDate ? ` · ${displayDate(data.pickupDate)}` : ""}${data.timeWindow ? `, ${data.timeWindow}` : ""}${paid}` }
+    case "upgradeRequests":
+      return { key, type: "subscription", section: "upgrade-plans", title: "New monthly subscription",
+        body: `${name} · ${data.planLabel || subscriptionPlanText(subscriptionPlanId(data)).label}${paid}` }
+    case "wasteBagOrders":
+      return { key, type: "order", section: "waste-bag-orders", title: "New waste bag order",
+        body: `${name} · ${data.bagSize || ""} bags × ${data.quantity ?? 1}${paid}` }
+    case "supportTickets":
+      return { key, type: "support", section: "support-tickets", title: `Support: ${data.category || "new ticket"}`,
+        body: `${name}${data.message ? ` · ${String(data.message).slice(0, 120)}` : ""}` }
+    default:
+      return null
+  }
+}
+
+// Once a day (with the collectors' morning summary): subscriptions that
+// have expired or expire within a week.
+async function sendAdminDigest() {
+  const now = new Date()
+  const hour = Number(new Intl.DateTimeFormat("en-GB", { timeZone: "Africa/Lagos", hour: "numeric", hourCycle: "h23" }).format(now))
+  if (hour < COLLECTOR_SUMMARY_HOUR || hour >= 12) return
+  const today = lagosToday()
+  const markerRef = db.collection("config").doc("adminDigest")
+  const claimed = await db.runTransaction(async (t) => {
+    const snap = await t.get(markerRef)
+    if (snap.exists && snap.data().lastDate === today) return false
+    t.set(markerRef, { lastDate: today, sentAt: now.toISOString() }, { merge: true })
+    return true
+  })
+  if (!claimed) return
+  const [subscribers, requests] = await Promise.all([
+    db.collection("subscribers").get(),
+    db.collection("upgradeRequests").get(),
+  ])
+  // WhatsApp plans already managed as subscribers are counted once.
+  const linked = new Set(subscribers.docs.map((d) => d.data().linkedRequestId).filter(Boolean))
+  const rows = [
+    ...subscribers.docs.map((d) => d.data()).filter((r) => r.status === "active"),
+    ...requests.docs.filter((d) => !linked.has(d.id)).map((d) => d.data()).filter((r) => r.status !== "cancelled"),
+  ]
+  const weekAhead = addDays(today, 7)
+  const expired = rows.filter((r) => r.paidUntil && r.paidUntil < today).length
+  const expiring = rows.filter((r) => r.paidUntil && r.paidUntil >= today && r.paidUntil <= weekAhead).length
+  if (!expired && !expiring) return
+  await notifyAdmins({
+    key: `digest_${today}`,
+    type: "renewal",
+    section: "subscriptions",
+    title: "Subscriptions to renew",
+    body: [expired && `${expired} expired`, expiring && `${expiring} expiring this week`].filter(Boolean).join(", ") + ". Send renewal reminders from Subscriptions.",
+  })
 }
 
 // ================= SUBSCRIBERS ADDED ON THE DASHBOARD =================
@@ -1411,6 +1574,13 @@ async function finalizePaystackPayment(reference, paidKobo, channel, customerPho
     await reportUnmatchedPayment(reference, paidKobo, customerPhone)
   } else if (result.outcome === "amount_mismatch") {
     console.error(`Paystack amount mismatch for ${reference}: paid ${paidKobo} kobo, expected ${result.p.amount * 100}`)
+    await notifyAdmins({
+      key: `mismatch_${reference}`,
+      type: "payment",
+      section: "payments",
+      title: "Payment amount doesn't match",
+      body: `Paystack ${reference}: paid ${naira(Number(paidKobo) / 100)}, expected ${naira(result.p.amount)}. Contact the customer.`,
+    })
     await sendWhatsAppMessage(result.p.customerPhone,
       "We received a payment that doesn't match your booking total. Our team will contact you shortly.")
   }
@@ -1430,6 +1600,13 @@ async function confirmRenewal(p, renewal) {
   const days = Array.isArray(data.pickupDays) ? data.pickupDays : []
   const time = SUBSCRIPTION_TIME_WINDOWS[data.timeWindow]
   const schedule = days.length ? `${joinDays(days)}${time ? `, ${time}` : ""}` : "as scheduled"
+  await notifyAdmins({
+    key: `renewal_${p.target.collection}_${p.target.id}_${renewal.paidUntil}`,
+    type: "payment",
+    section: "subscriptions",
+    title: "Subscription renewed",
+    body: `${name} · ${plan} · ${naira(p.amount)} paid (Paystack) · now paid until ${displayDate(renewal.paidUntil)}`,
+  })
   await notifyCustomer(
     p.customerPhone,
     TEMPLATE_SUBSCRIPTION,
@@ -1502,6 +1679,7 @@ async function cleanUpOldRecords() {
     // Paid links are kept: they link a Paystack payment to its booking.
     const links = await deleteOlderThan("pendingPayments", "createdAt", 30, (p) => p.status === "paid" || p.status === "amount_mismatch")
     const renewals = await deleteOlderThan("renewals", "createdAt", 90)
+    await deleteOlderThan("notifications", "createdAt", 30)
     if (messages || links || renewals) {
       console.log(`Cleanup: removed ${messages} old message markers, ${links} unpaid payment links, ${renewals} old renewal links`)
     }
@@ -1810,6 +1988,13 @@ nextApp.prepare().then(() => {
         })
         // The next photo they send in the hour is the proof for this job.
         await listRef.set({ awaitingPhoto: { ...job.entry, until: new Date(Date.now() + 60 * 60 * 1000).toISOString() } }, { merge: true })
+        await notifyAdmins({
+          key: `report_${job.entry.collection}_${job.entry.id}_${now}`,
+          type: "collector",
+          section: "collectors",
+          title: `${collector.name || "A collector"} reported a pickup done`,
+          body: `${who}${job.data.address ? ` · ${job.data.address}` : ""}. Confirm it on the Collectors page.`,
+        })
         await reply(
           `\u2705 Thanks! Job ${n} (${who}) is reported as done.\n\n` +
           `\u{1F4F8} Send a photo of the collected waste as proof, or reply *SKIP*.`
@@ -1820,6 +2005,13 @@ nextApp.prepare().then(() => {
         await job.ref.update({
           collectorReport: { status: "failed", at: now, reason, collectorId: collector.id, collectorName: collector.name || "" },
           updatedAt: now,
+        })
+        await notifyAdmins({
+          key: `report_${job.entry.collection}_${job.entry.id}_${now}`,
+          type: "collector",
+          section: "collectors",
+          title: `${collector.name || "A collector"} couldn't pick up`,
+          body: `${who} · ${reason}`,
         })
         await reply(`\u274C Noted: job ${n} (${who}) couldn't be picked up${reason !== "No reason given" ? ` (${reason})` : ""}. The admin will follow up.`)
       }
@@ -2449,7 +2641,7 @@ nextApp.prepare().then(() => {
     const cutoff = Date.now() - 15 * 60 * 1000
     for (const [ip, times] of attempts) if (times.every((t) => t < cutoff)) attempts.delete(ip)
   }, 15 * 60 * 1000).unref()
-  app.use(["/api/admin-auth/setup", "/api/sub-admins"], rateLimit)
+  app.use(["/api/admin-auth/setup", "/api/sub-admins", "/api/push"], rateLimit)
 
   const ADMIN_EMAIL_DOMAIN = "admins.wastecore.local"
   const USERNAME_RE = /^[a-z0-9._-]{3,30}$/
@@ -2536,6 +2728,54 @@ nextApp.prepare().then(() => {
       console.error("main admin setup failed:", err)
       res.status(400).json({ error: authErrorMessage(err) })
     }
+  })
+
+  // Any signed-in, active admin (main or sub).
+  async function requireAdmin(req, res, next) {
+    try {
+      const token = (req.headers.authorization || "").replace(/^Bearer /, "")
+      const decoded = await admin.auth().verifyIdToken(token, true)
+      const profile = await db.collection("admins").doc(decoded.uid).get()
+      if (!profile.exists || profile.data().active === false) return res.status(403).json({ error: "Not an admin." })
+      req.adminUid = decoded.uid
+      next()
+    } catch {
+      res.status(401).json({ error: "Please sign in again." })
+    }
+  }
+
+  // ── Push notifications for admins' devices ────────────────────────────────
+  app.get("/api/push/key", async (req, res) => {
+    const keys = await webPushKeys()
+    if (!keys) return res.status(503).json({ error: "Notifications are not available right now." })
+    res.json({ publicKey: keys.publicKey })
+  })
+
+  const subscriptionId = (endpoint) => crypto.createHash("sha256").update(String(endpoint)).digest("hex").slice(0, 40)
+
+  app.post("/api/push/subscribe", requireAdmin, async (req, res) => {
+    const sub = req.body?.subscription
+    if (!sub?.endpoint || !/^https:\/\//.test(sub.endpoint) || !sub.keys?.p256dh || !sub.keys?.auth) {
+      return res.status(400).json({ error: "Invalid subscription." })
+    }
+    await db.collection("pushSubscriptions").doc(subscriptionId(sub.endpoint)).set({
+      subscription: { endpoint: sub.endpoint, keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth } },
+      uid: req.adminUid,
+      userAgent: String(req.headers["user-agent"] || "").slice(0, 200),
+      createdAt: new Date().toISOString(),
+    })
+    res.json({ ok: true })
+  })
+
+  app.post("/api/push/unsubscribe", requireAdmin, async (req, res) => {
+    if (req.body?.endpoint) await db.collection("pushSubscriptions").doc(subscriptionId(req.body.endpoint)).delete().catch(() => {})
+    res.json({ ok: true })
+  })
+
+  // Sends a test notification to the caller's own devices.
+  app.post("/api/push/test", requireAdmin, async (req, res) => {
+    const sent = await sendAdminPush({ title: "Notifications are on ✅", body: "You'll get WasteCore activity on this device.", section: "overview", tag: "test" }, req.adminUid)
+    res.json({ sent })
   })
 
   app.post("/api/sub-admins", requireMainAdmin, async (req, res) => {
