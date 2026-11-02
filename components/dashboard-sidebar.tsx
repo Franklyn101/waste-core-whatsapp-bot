@@ -4,7 +4,7 @@ import { useState } from "react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
-import { LayoutDashboard, Truck, Ticket, Rocket, Trash, Zap, Users, Receipt, BarChart3, Menu, X, HardHat, UserCog, CalendarClock, Banknote, History } from "lucide-react"
+import { LayoutDashboard, Truck, Ticket, Rocket, Trash, Zap, Users, Receipt, BarChart3, Menu, X, HardHat, UserCog, CalendarClock, Banknote, History, Megaphone } from "lucide-react"
 import { useAdminAuth } from "@/lib/admin-auth"
 import { can, type Permission } from "@/lib/permissions"
 
@@ -77,6 +77,12 @@ const navigationItems = [
     label: "Revenue Reports",
     icon: Banknote,
     permission: "viewRevenue" as Permission,
+  },
+  {
+    id: "broadcasts",
+    label: "Broadcasts",
+    icon: Megaphone,
+    permission: "sendBroadcasts" as Permission,
   },
 ]
 

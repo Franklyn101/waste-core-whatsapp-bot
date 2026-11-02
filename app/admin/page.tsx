@@ -23,6 +23,7 @@ import { Toaster } from "@/components/ui/sonner"
 import { RevenueReports } from "@/components/revenue-reports"
 import { ActivityLog } from "@/components/activity-log"
 import { CustomersManager } from "@/components/customers-manager"
+import { BroadcastsManager } from "@/components/broadcasts-manager"
 import { can } from "@/lib/permissions"
 
 
@@ -221,6 +222,17 @@ function DashboardPage() {
               </p>
             </div>
             <RevenueReports />
+          </div>
+        )
+      case "broadcasts":
+        if (!can(profile, "sendBroadcasts")) return <div>You don&apos;t have access to broadcasts. Ask the main admin.</div>
+        return (
+          <div className="space-y-6">
+            <div>
+              <h1 className="text-2xl md:text-3xl font-bold text-balance">Broadcasts</h1>
+              <p className="text-muted-foreground mt-2">Send an announcement to a group of customers on WhatsApp: holidays, schedule changes, offers.</p>
+            </div>
+            <BroadcastsManager />
           </div>
         )
       case "activity":

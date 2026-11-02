@@ -1016,6 +1016,76 @@ async function sendAdminDigest() {
   })
 }
 
+// ================= BROADCASTS =================
+// Announcements from the dashboard to a group of customers. Customers who
+// haven't messaged recently only get approved templates, so this uses a
+// Marketing template (WAPI_TEMPLATE_ANNOUNCEMENT):
+//   name: "announcement"   category: Marketing
+//   body: "Hello {{1}}, {{2}}
+//
+//          Reply UNSUBSCRIBE to stop these updates."
+// Customers who reply UNSUBSCRIBE are skipped (customers/{id}.broadcastOptOut).
+const TEMPLATE_ANNOUNCEMENT = process.env.WAPI_TEMPLATE_ANNOUNCEMENT || "announcement"
+const BROADCAST_AUDIENCES = ["all", "subscribers", "business", "household", "recent"]
+
+// phone (whatsapp:+234...) -> name, for an audience.
+async function broadcastRecipients(audience) {
+  const recipients = new Map()
+  const add = (phone, name) => {
+    const id = toWhatsAppId(phone)
+    if (id && !recipients.has(id)) recipients.set(id, String(name || "").trim())
+    else if (id && name && !recipients.get(id)) recipients.set(id, String(name).trim())
+  }
+  const subs = await activeSubscriptions()
+  if (audience === "subscribers" || audience === "business" || audience === "household") {
+    for (const s of subs) {
+      const category = subscriptionPlanId(s.data).split("_")[0]
+      if (audience !== "subscribers" && category !== audience) continue
+      add(s.data.customerPhone, s.data.customerName)
+    }
+  } else {
+    const cutoff = new Date(Date.now() - 60 * 86400000).toISOString()
+    const cols = ["instantPickups", "pickupRequests", "upgradeRequests", "wasteBagOrders"]
+    const snaps = await Promise.all(cols.map((c) => db.collection(c).get()))
+    for (const snap of snaps) {
+      for (const d of snap.docs) {
+        const data = d.data()
+        if (audience === "recent" && String(data.createdAt || "") < cutoff) continue
+        add(data.customerPhone, data.customerName)
+      }
+    }
+    if (audience === "all") {
+      for (const s of subs) add(s.data.customerPhone, s.data.customerName)
+      const customers = await db.collection("customers").get()
+      for (const d of customers.docs) add(d.data().phone || d.id, d.data().name || d.data().businessName)
+    }
+  }
+  // Skip customers who unsubscribed.
+  const optedOut = await db.collection("customers").where("broadcastOptOut", "==", true).get()
+  for (const d of optedOut.docs) recipients.delete(toWhatsAppId(d.data().phone || d.id))
+  return recipients
+}
+
+// Sends in the background, about 3 per second, updating broadcasts/{id}.
+async function runBroadcast(ref, recipients, message) {
+  let sent = 0
+  let failed = 0
+  let i = 0
+  for (const [phone, name] of recipients) {
+    const status = await notifyCustomer(
+      phone,
+      TEMPLATE_ANNOUNCEMENT,
+      [displayName(name) || "there", message],
+      `\u{1F4E2} *WasteCore update*\n\nHello ${displayName(name) || "there"}, ${message}\n\n_Reply UNSUBSCRIBE to stop these updates._`
+    ).catch(() => "failed")
+    if (status === "failed") failed++
+    else sent++
+    if (++i % 10 === 0) await ref.update({ sent, failed }).catch(() => {})
+    await new Promise((r) => setTimeout(r, 300))
+  }
+  await ref.update({ sent, failed, status: "done", finishedAt: new Date().toISOString() })
+}
+
 // ================= RATINGS =================
 // After a pickup is completed the customer is asked for 1-5 stars (a
 // tappable list; it reaches them if they messaged within 24 hours). Their
@@ -2333,6 +2403,19 @@ nextApp.prepare().then(() => {
       }
     }
 
+    // Announcements opt-out / opt-in.
+    if (/^(unsubscribe|stop updates|stop promos?)[\s.!]*$/.test(msg)) {
+      await saveCustomer(from, { broadcastOptOut: true })
+      await sendWhatsAppMessage(from, "You won't receive WasteCore announcements any more. Reply *START UPDATES* to get them again. Your bookings and pickup messages are not affected.")
+      return
+    }
+    // ("subscribe" alone is left for customers who want a monthly plan.)
+    if (/^(start updates|subscribe( to)? updates)[\s.!]*$/.test(msg)) {
+      await saveCustomer(from, { broadcastOptOut: false })
+      await sendWhatsAppMessage(from, "\u2705 You'll receive WasteCore announcements again. Reply *UNSUBSCRIBE* anytime to stop.")
+      return
+    }
+
     // Collectors: JOBS, DONE 2, FAILED 2 reason, a proof photo, SKIP.
     const command = collectorCommand(msg, hasImage)
     if (command) {
@@ -3325,7 +3408,7 @@ nextApp.prepare().then(() => {
     const cutoff = Date.now() - 15 * 60 * 1000
     for (const [ip, times] of attempts) if (times.every((t) => t < cutoff)) attempts.delete(ip)
   }, 15 * 60 * 1000).unref()
-  app.use(["/api/admin-auth/setup", "/api/sub-admins", "/api/push"], rateLimit)
+  app.use(["/api/admin-auth/setup", "/api/sub-admins", "/api/push", "/api/broadcasts"], rateLimit)
 
   const ADMIN_EMAIL_DOMAIN = "admins.wastecore.local"
   const USERNAME_RE = /^[a-z0-9._-]{3,30}$/
@@ -3442,6 +3525,44 @@ nextApp.prepare().then(() => {
       res.status(401).json({ error: "Please sign in again." })
     }
   }
+
+  // Main admin, or a sub-admin with the given permission switched on.
+  const requirePermission = (permission) => async (req, res, next) => {
+    const profile = await db.collection("admins").doc(req.adminUid).get()
+    const data = profile.data() || {}
+    if (data.role === "main" || data.permissions?.[permission] === true) return next()
+    res.status(403).json({ error: "You don't have permission to do this. Ask the main admin." })
+  }
+
+  // ── Broadcasts ────────────────────────────────────────────────────────────
+  // { audience, message, preview } -> { count } (preview) or { id, count }.
+  app.post("/api/broadcasts", requireAdmin, requirePermission("sendBroadcasts"), async (req, res) => {
+    const audience = String(req.body?.audience || "")
+    const message = String(req.body?.message || "").replace(/\s+/g, " ").trim()
+    if (!BROADCAST_AUDIENCES.includes(audience)) return res.status(400).json({ error: "Choose who to send to." })
+    if (!req.body?.preview && (message.length < 5 || message.length > 900)) {
+      return res.status(400).json({ error: "Write a message between 5 and 900 characters." })
+    }
+    try {
+      const recipients = await broadcastRecipients(audience)
+      if (req.body?.preview) return res.json({ count: recipients.size })
+      if (!recipients.size) return res.status(400).json({ error: "No customers in this group." })
+      const profile = await db.collection("admins").doc(req.adminUid).get()
+      const ref = await db.collection("broadcasts").add({
+        audience, message, total: recipients.size, sent: 0, failed: 0, status: "sending",
+        createdBy: profile.data()?.username || "", createdAt: new Date().toISOString(),
+      })
+      await logAdminActivity(req.adminUid, "Sent broadcast", { audience, count: recipients.size, message: message.slice(0, 120) })
+      res.json({ id: ref.id, count: recipients.size })
+      runBroadcast(ref, recipients, message).catch((err) => {
+        console.error("Broadcast failed:", err)
+        ref.update({ status: "failed" }).catch(() => {})
+      })
+    } catch (err) {
+      console.error("Broadcast setup failed:", err)
+      res.status(500).json({ error: "Could not send the broadcast. Please try again." })
+    }
+  })
 
   // ── Push notifications for admins' devices ────────────────────────────────
   app.get("/api/push/key", async (req, res) => {
