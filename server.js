@@ -687,48 +687,87 @@ async function notifyCollectorIfAssigned(collectionName, docSnap) {
 
 // Open jobs on the given dates, grouped by collector id.
 async function jobsByCollector(dates) {
-  const snaps = await Promise.all(COLLECTOR_COLLECTIONS.flatMap((col) =>
-    dates.map((date) => db.collection(col).where("pickupDate", "==", date).get())
-  ))
+  const queries = COLLECTOR_COLLECTIONS.flatMap((col) => dates.map((date) => ({ col, date })))
+  const snaps = await Promise.all(queries.map(({ col, date }) => db.collection(col).where("pickupDate", "==", date).get()))
   const byCollector = new Map()
-  for (const snap of snaps) {
+  snaps.forEach((snap, i) => {
     for (const d of snap.docs) {
-      const job = d.data()
+      // _ref lets a collector's "DONE 2" find the job's document.
+      const job = { ...d.data(), _ref: { collection: queries[i].col, id: d.id } }
       if (!job.collectorId || !OPEN_JOB_STATUSES.includes(job.status)) continue
       if (!byCollector.has(job.collectorId)) byCollector.set(job.collectorId, [])
       byCollector.get(job.collectorId).push(job)
     }
-  }
+  })
   const order = { "Morning (8am-12pm)": 1, "Afternoon (12pm-4pm)": 2, "Evening (4pm-7pm)": 3 }
   for (const list of byCollector.values()) {
-    list.sort((a, b) => a.pickupDate.localeCompare(b.pickupDate) || (order[a.timeWindow] ?? 0) - (order[b.timeWindow] ?? 0))
+    list.sort((a, b) =>
+      a.pickupDate.localeCompare(b.pickupDate) ||
+      (order[a.timeWindow] ?? 0) - (order[b.timeWindow] ?? 0) ||
+      String(a.customerName || "").localeCompare(String(b.customerName || "")))
   }
   return byCollector
 }
 
-// Reply to "JOBS": today's and the next two days' open jobs.
+// Reply to "JOBS": today's and the next two days' open jobs, numbered so
+// the collector can reply "DONE 2" / "FAILED 2 reason". The numbering is
+// saved in collectorJobLists/{collectorId} so those replies find the job.
 async function collectorJobsMessage(collector) {
   const today = lagosToday()
   const dates = [today, addDays(today, 1), addDays(today, 2)]
   const jobs = (await jobsByCollector(dates)).get(collector.id) || []
+  await db.collection("collectorJobLists").doc(collector.id).set({
+    jobs: jobs.map((j) => ({ ...j._ref, customerName: j.customerName || "" })),
+    at: new Date().toISOString(),
+  }, { merge: true })
   if (!jobs.length) return `Hello ${collector.name || ""}! You have no pickups assigned for today or the next 2 days.`.replace("Hello !", "Hello!")
   const lines = [`\u{1F4CB} *Your pickups, ${collector.name || ""}*`.replace(", *", "*")]
+  let number = 0
   for (const date of dates) {
     const day = jobs.filter((j) => j.pickupDate === date)
     if (!day.length) continue
     const label = date === today ? "Today" : date === dates[1] ? "Tomorrow" : ""
     lines.push("", `*${label ? `${label}, ` : ""}${shortDay(date)}*`)
-    day.forEach((j, i) => {
+    for (const j of day) {
+      number++
       const link = mapsLink(j.address)
+      const report = j.collectorReport?.status === "done" ? "\u2705 Reported done, waiting for admin"
+        : j.collectorReport?.status === "failed" ? "\u274C Reported not picked up" : null
       lines.push(
-        `${i + 1}. ${jobCustomer(j)}`,
+        `*${number}.* ${jobCustomer(j)}`,
         `   \u{1F4CD} ${j.address || "No address"}`,
         ...(link ? [`   \u{1F5FA} ${link}`] : []),
-        `   \u{1F6CD} ${jobWhat(j)}${j.timeWindow ? ` \u00B7 ${j.timeWindow}` : ""}`
+        `   \u{1F6CD} ${jobWhat(j)}${j.timeWindow ? ` \u00B7 ${j.timeWindow}` : ""}`,
+        ...(report ? [`   ${report}`] : [])
       )
-    })
+    }
   }
+  lines.push(
+    "",
+    "After a pickup, reply *DONE* and the job number, e.g. *DONE 1*.",
+    "If you couldn't pick up, reply *FAILED*, the number and why, e.g. *FAILED 1 gate locked*."
+  )
   return lines.join("\n")
+}
+
+// Finds job number `n` from the collector's last list (or a fresh one).
+// Returns { ref, data } or a message explaining why it can't be used.
+async function collectorJob(collector, n) {
+  const listRef = db.collection("collectorJobLists").doc(collector.id)
+  let list = (await listRef.get()).data()
+  const fresh = list?.at && Date.now() - Date.parse(list.at) < 36 * 60 * 60 * 1000
+  if (!fresh) {
+    await collectorJobsMessage(collector)
+    list = (await listRef.get()).data()
+  }
+  const entry = list?.jobs?.[n - 1]
+  if (!entry) return { error: `There's no job ${n} on your list. Reply *JOBS* to see your numbered pickups.` }
+  const ref = db.collection(entry.collection).doc(entry.id)
+  const snap = await ref.get()
+  const data = snap.exists ? snap.data() : null
+  if (!data || data.collectorId !== collector.id) return { error: `Job ${n} is no longer assigned to you. Reply *JOBS* for your current list.` }
+  if (!OPEN_JOB_STATUSES.includes(data.status)) return { error: `Job ${n} (${data.customerName || "customer"}) is already ${data.status}.` }
+  return { ref, data, entry }
 }
 
 // Morning summary: once a day after COLLECTOR_SUMMARY_HOUR (Nigerian time),
@@ -1611,17 +1650,17 @@ nextApp.prepare().then(() => {
     return Buffer.from(response.data, "binary")
   }
 
-  async function uploadImageToCloudinary(imageBuffer, from, mediaType = "image") {
+  async function uploadImageToCloudinary(imageBuffer, from, mediaType = "image", kind = "receipt") {
     return new Promise((resolve, reject) => {
       cloudinary.uploader
         .upload_stream(
           {
-            folder: "waste-connect/receipts",
+            folder: kind === "proof" ? "waste-connect/pickup-proof" : "waste-connect/receipts",
             // Cloudinary stores PDFs as "image" assets, so the dashboard
             // can show a preview of the first page.
             resource_type: "image",
             ...(mediaType === "pdf" ? { format: "pdf" } : {}),
-            public_id: `receipt_${from.replace(/whatsapp:\+?/i, "")}_${Date.now()}`,
+            public_id: `${kind}_${from.replace(/whatsapp:\+?/i, "")}_${Date.now()}`,
           },
           (error, result) => (error ? reject(error) : resolve(result.secure_url))
         )
@@ -1645,9 +1684,9 @@ nextApp.prepare().then(() => {
     return `firebase:${docId}`
   }
 
-  // Returns the saved receipt's URL, or null if it couldn't be downloaded
-  // or stored (the customer is then asked to send it again).
-  async function handleReceiptUpload(mediaId, from, mediaType) {
+  // Returns the saved receipt's (or collector's proof photo's) URL, or null
+  // if it couldn't be downloaded or stored (they're asked to send it again).
+  async function handleReceiptUpload(mediaId, from, mediaType, kind = "receipt") {
     let buffer
     try {
       buffer = await downloadMetaMedia(mediaId)
@@ -1657,7 +1696,7 @@ nextApp.prepare().then(() => {
     }
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
-        return await uploadImageToCloudinary(buffer, from, mediaType)
+        return await uploadImageToCloudinary(buffer, from, mediaType, kind)
       } catch (err) {
         console.error(`Cloudinary upload attempt ${attempt} failed:`, err.message || err)
       }
@@ -1737,6 +1776,79 @@ nextApp.prepare().then(() => {
       WEEKLY_PLAN_LABELS[d.serviceType] || (b.collection === "upgradeRequests" ? "Monthly subscription" : "Pickup")
   }
 
+  // ── Collector commands ────────────────────────────────────────────────────
+  function collectorCommand(msg, hasImage) {
+    if (/^(my\s+)?(jobs?|pickups?)[\s.!?]*$/.test(msg)) return "jobs"
+    if (/^(done|completed?|picked(\s+up)?)\s*(job\s*)?#?\s*\d+/.test(msg)) return "done"
+    if (/^(failed|fail|missed|not\s+done|couldn'?t(\s+pick(\s+up)?)?)\s*(job\s*)?#?\s*\d+/.test(msg)) return "failed"
+    if (/^skip[\s.!]*$/.test(msg)) return "skip"
+    if (hasImage) return "photo"
+    return null
+  }
+
+  // Returns true when the message was a collector command (and was answered);
+  // false lets it continue as a normal customer message.
+  async function handleCollectorCommand(collector, command, { from, msg, rawMsg, mediaId, mediaType }) {
+    const reply = (text) => sendWhatsAppMessage(from, text)
+    const listRef = db.collection("collectorJobLists").doc(collector.id)
+    const now = new Date().toISOString()
+
+    if (command === "jobs") {
+      await reply(await collectorJobsMessage(collector))
+      return true
+    }
+
+    if (command === "done" || command === "failed") {
+      const n = Number(msg.match(/\d+/)[0])
+      const job = await collectorJob(collector, n)
+      if (job.error) { await reply(job.error); return true }
+      const who = job.data.customerName || "the customer"
+      if (command === "done") {
+        await job.ref.update({
+          collectorReport: { status: "done", at: now, collectorId: collector.id, collectorName: collector.name || "", photoUrl: null },
+          updatedAt: now,
+        })
+        // The next photo they send in the hour is the proof for this job.
+        await listRef.set({ awaitingPhoto: { ...job.entry, until: new Date(Date.now() + 60 * 60 * 1000).toISOString() } }, { merge: true })
+        await reply(
+          `\u2705 Thanks! Job ${n} (${who}) is reported as done.\n\n` +
+          `\u{1F4F8} Send a photo of the collected waste as proof, or reply *SKIP*.`
+        )
+      } else {
+        // Reason: whatever follows the job number, as typed.
+        const reason = rawMsg.replace(/^[^\d]*\d+\s*[-:,.]?\s*/, "").trim().slice(0, 200) || "No reason given"
+        await job.ref.update({
+          collectorReport: { status: "failed", at: now, reason, collectorId: collector.id, collectorName: collector.name || "" },
+          updatedAt: now,
+        })
+        await reply(`\u274C Noted: job ${n} (${who}) couldn't be picked up${reason !== "No reason given" ? ` (${reason})` : ""}. The admin will follow up.`)
+      }
+      return true
+    }
+
+    // A photo or SKIP only counts after DONE; otherwise it's a normal message.
+    const awaiting = (await listRef.get()).data()?.awaitingPhoto
+    if (!awaiting || Date.parse(awaiting.until) < Date.now()) return false
+    const jobRef = db.collection(awaiting.collection).doc(awaiting.id)
+    if (command === "skip") {
+      await listRef.set({ awaitingPhoto: null }, { merge: true })
+      await reply("OK, no photo. The admin will confirm the pickup.")
+      return true
+    }
+    const photoUrl = await handleReceiptUpload(mediaId, from, mediaType, "proof")
+    if (!photoUrl) {
+      await reply("Sorry, the photo didn't save. Please send it again, or reply *SKIP*.")
+      return true
+    }
+    const jobSnap = await jobRef.get()
+    if (jobSnap.exists) {
+      await jobRef.update({ collectorReport: { ...(jobSnap.data().collectorReport || {}), photoUrl }, updatedAt: now })
+    }
+    await listRef.set({ awaitingPhoto: null }, { merge: true })
+    await reply("\u{1F4F8} Photo saved. The admin will confirm the pickup.")
+    return true
+  }
+
   async function handleIncoming({
     from, msg, rawMsg = "", hasImage, mediaId, mediaType, unsupportedMedia, messageId, phoneNumberId, displayNumber,
   }) {
@@ -1756,13 +1868,11 @@ nextApp.prepare().then(() => {
       }
     }
 
-    // Collectors reply "JOBS" to get their pickup list.
-    if (/^(my\s+)?(jobs?|pickups?)[\s.!?]*$/.test(msg)) {
+    // Collectors: JOBS, DONE 2, FAILED 2 reason, a proof photo, SKIP.
+    const command = collectorCommand(msg, hasImage)
+    if (command) {
       const collector = await findCollectorByPhone(from)
-      if (collector) {
-        await sendWhatsAppMessage(from, await collectorJobsMessage(collector))
-        return
-      }
+      if (collector && await handleCollectorCommand(collector, command, { from, msg, rawMsg, mediaId, mediaType })) return
     }
 
     // GLOBAL CANCEL

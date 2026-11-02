@@ -194,6 +194,7 @@ function normalizeCollectorPickup(data: any, id: string, col: CollectorPickup["c
     subscriberId:  data.subscriberId ?? undefined,
     planId:        data.planId ?? undefined,
     collectorMessage: data.collectorMessage ?? null,
+    collectorReport: data.collectorReport ?? null,
     createdAt:     parseDate(data.createdAt),
   }
 }
@@ -561,6 +562,8 @@ export class FirebaseService {
         updatedAt: new Date().toISOString(),
       }
       if (collector) update.collectorAssignedAt = update.updatedAt
+      // A report from the previous collector doesn't apply to the new one.
+      if ((collector?.id ?? null) !== pickup.collectorId) update.collectorReport = null
       if (collector && pickup.status === "pending") {
         update.status = "assigned"
         update.assignedAt = update.updatedAt

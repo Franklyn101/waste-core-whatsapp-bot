@@ -44,6 +44,14 @@ export type CollectorInput = Pick<Collector, "name" | "phone" | "area" | "active
 
 export type PickupCollection = "instantPickups" | "pickupRequests"
 
+export interface CollectorReport {
+  status: "done" | "failed"
+  at: string
+  reason?: string
+  photoUrl?: string | null
+  collectorName?: string
+}
+
 export type PickupStatus = "pending" | "assigned" | "completed" | "incomplete" | "cancelled"
 
 // A pickup from either pickup collection, or one day's visit for a
@@ -68,6 +76,9 @@ export interface CollectorPickup {
   planId?: string
   // Outcome of the bot's WhatsApp message to the collector.
   collectorMessage?: { status: string; at?: string } | null
+  // What the collector reported on WhatsApp (DONE / FAILED), for the admin
+  // to confirm.
+  collectorReport?: CollectorReport | null
   createdAt: Date
 }
 

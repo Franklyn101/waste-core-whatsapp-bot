@@ -50,7 +50,9 @@ import {
 import {
   AlertCircle,
   Calendar,
+  CheckCircle2,
   ClipboardList,
+  Image as ImageIcon,
   MapPin,
   MessageCircle,
   MoreHorizontal,
@@ -66,6 +68,16 @@ import type { Collector, CollectorInput, CollectorPickup, PickupStatus, Subscrip
 
 const UNASSIGNED = "__unassigned__"
 const ALL = "__all__"
+const REPORTED = "__reported__"
+
+const isOpen = (p: CollectorPickup) => ["pending", "assigned", "confirmed"].includes(p.status)
+// Collector says it's done; the admin hasn't confirmed yet.
+const awaitingConfirmation = (p: CollectorPickup) => isOpen(p) && p.collectorReport?.status === "done"
+
+function reportTime(iso: string): string {
+  const d = new Date(iso)
+  return isNaN(d.getTime()) ? "" : d.toLocaleString("en-NG", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" })
+}
 
 const STATUS_OPTIONS: { value: PickupStatus; label: string }[] = [
   { value: "pending",    label: "Pending" },
@@ -261,7 +273,9 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
   const visiblePickups = pickups.filter((p) => {
     if (collectorFilter === UNASSIGNED && p.collectorId) return false
     if (collectorFilter !== ALL && collectorFilter !== UNASSIGNED && p.collectorId !== collectorFilter) return false
-    if (statusFilter !== ALL && p.status !== statusFilter) return false
+    if (statusFilter === REPORTED) {
+      if (!(isOpen(p) && p.collectorReport)) return false
+    } else if (statusFilter !== ALL && p.status !== statusFilter) return false
     if (query) {
       const haystack = `${p.customerName} ${p.address} ${p.wasteType} ${p.collectorName}`.toLowerCase()
       if (!haystack.includes(query)) return false
@@ -381,20 +395,55 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
     )
   }
 
-  const statusCell = (p: CollectorPickup) => (
-    <Select value={p.status} onValueChange={(v) => handleStatus(p, v as PickupStatus)}>
-      <SelectTrigger className="w-36">
-        <SelectValue>
-          <Badge className={STATUS_BADGE[p.status] ?? STATUS_BADGE.pending}>{p.status}</Badge>
-        </SelectValue>
-      </SelectTrigger>
-      <SelectContent>
-        {STATUS_OPTIONS.map((s) => (
-          <SelectItem key={s.value} value={s.value}>{s.label}</SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
-  )
+  const statusCell = (p: CollectorPickup) => {
+    const report = p.collectorReport
+    const photo = report?.photoUrl && !report.photoUrl.startsWith("firebase:") ? report.photoUrl : null
+    return (
+      <div className="flex flex-col items-start gap-1">
+        <Select value={p.status} onValueChange={(v) => handleStatus(p, v as PickupStatus)}>
+          <SelectTrigger className="w-36">
+            <SelectValue>
+              <Badge className={STATUS_BADGE[p.status] ?? STATUS_BADGE.pending}>{p.status}</Badge>
+            </SelectValue>
+          </SelectTrigger>
+          <SelectContent>
+            {STATUS_OPTIONS.map((s) => (
+              <SelectItem key={s.value} value={s.value}>{s.label}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        {report && isOpen(p) && (
+          <div className="max-w-44 text-[11px]">
+            {report.status === "done" ? (
+              <span className="font-medium text-amber-700">🟡 Collector reported done</span>
+            ) : (
+              <span className="font-medium text-destructive">🔴 Couldn&apos;t pick up{report.reason ? `: ${report.reason}` : ""}</span>
+            )}
+            <div className="text-muted-foreground">
+              {report.collectorName ? `${report.collectorName} · ` : ""}{reportTime(report.at)}
+            </div>
+            {photo && (
+              <a href={photo} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-green-700 hover:underline">
+                <ImageIcon className="h-3 w-3" /> View photo
+              </a>
+            )}
+            {report.photoUrl?.startsWith("firebase:") && <div className="text-muted-foreground">Photo saved as backup copy</div>}
+            <div className="mt-1 flex flex-wrap gap-1">
+              {report.status === "done" ? (
+                <Button size="sm" className="h-7 px-2 text-xs" onClick={() => handleStatus(p, "completed")}>
+                  <CheckCircle2 className="mr-1 h-3 w-3" /> Confirm completed
+                </Button>
+              ) : (
+                <Button size="sm" variant="outline" className="h-7 px-2 text-xs" onClick={() => handleStatus(p, "incomplete")}>
+                  Mark incomplete
+                </Button>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    )
+  }
 
   if (isLoading) {
     return (
@@ -420,8 +469,19 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
         </div>
       )}
 
-      <div className="grid grid-cols-3 gap-2 md:gap-4">
+      <div className="grid grid-cols-2 gap-2 md:grid-cols-4 md:gap-4">
         <SummaryCard label="Collectors" value={collectors.length} hint={`${activeCollectors.length} active`} />
+        <button
+          type="button"
+          className="text-left"
+          onClick={() => { setTab("pickups"); setCollectorFilter(ALL); setStatusFilter(REPORTED) }}
+        >
+          <SummaryCard
+            label="Awaiting confirmation"
+            value={[...pickups, ...visits].filter(awaitingConfirmation).length}
+            hint="Collectors reported done"
+          />
+        </button>
         <SummaryCard label="Unassigned pickups" value={unassignedCount} hint="Waiting for a collector" />
         <SummaryCard
           label="Incomplete pickups"
@@ -624,6 +684,7 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value={ALL}>All statuses</SelectItem>
+                      <SelectItem value={REPORTED}>Reported by collector</SelectItem>
                       {STATUS_OPTIONS.map((s) => (
                         <SelectItem key={s.value} value={s.value}>{s.label}</SelectItem>
                       ))}
