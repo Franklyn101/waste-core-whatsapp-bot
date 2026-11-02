@@ -32,6 +32,7 @@ import type {
   GeoPin,
 } from "./types"
 import { findPlan } from "./subscriptions"
+import { logActivity } from "./activity"
 
 // ======================
 // SAFE DATE PARSER
@@ -421,6 +422,7 @@ export class FirebaseService {
   static async updateRequestStatus(requestId: string, status: string): Promise<boolean> {
     try {
       await updateDoc(doc(db, "pickupRequests", requestId), { status, updatedAt: new Date().toISOString() })
+      logActivity("Changed status", { collection: "pickupRequests", targetId: requestId, status })
       return true
     } catch (err) { console.error("pickupRequests update failed", err); return false }
   }
@@ -428,6 +430,7 @@ export class FirebaseService {
   static async updateInstantPickupStatus(requestId: string, status: string): Promise<boolean> {
     try {
       await updateDoc(doc(db, "instantPickups", requestId), { status, updatedAt: new Date().toISOString() })
+      logActivity("Changed status", { collection: "instantPickups", targetId: requestId, status })
       return true
     } catch (err) { console.error("instantPickups update failed", err); return false }
   }
@@ -435,6 +438,7 @@ export class FirebaseService {
   static async updateWasteBagOrderStatus(orderId: string, status: string): Promise<boolean> {
     try {
       await updateDoc(doc(db, "wasteBagOrders", orderId), { status, updatedAt: new Date().toISOString() })
+      logActivity("Changed status", { collection: "wasteBagOrders", targetId: orderId, status })
       return true
     } catch (err) { console.error("wasteBagOrders update failed", err); return false }
   }
@@ -442,6 +446,7 @@ export class FirebaseService {
   static async updateUpgradeRequestStatus(requestId: string, status: string): Promise<boolean> {
     try {
       await updateDoc(doc(db, "upgradeRequests", requestId), { status, updatedAt: new Date().toISOString() })
+      logActivity("Changed status", { collection: "upgradeRequests", targetId: requestId, status })
       return true
     } catch (err) { console.error("upgradeRequests update failed", err); return false }
   }
@@ -449,6 +454,7 @@ export class FirebaseService {
   static async updateSupportTicketStatus(ticketId: string, status: string): Promise<boolean> {
     try {
       await updateDoc(doc(db, "supportTickets", ticketId), { status, updatedAt: new Date().toISOString() })
+      logActivity("Changed status", { collection: "supportTickets", targetId: ticketId, status })
       return true
     } catch (err) { console.error("supportTickets update failed", err); return false }
   }
@@ -499,6 +505,7 @@ export class FirebaseService {
     try {
       const now = new Date().toISOString()
       await addDoc(collection(db, "collectors"), { ...input, createdAt: now, updatedAt: now })
+      logActivity("Registered collector", { collection: "collectors", target: input.name })
       return true
     } catch (err) { console.error("collector create failed", err); return false }
   }
@@ -506,6 +513,7 @@ export class FirebaseService {
   static async updateCollector(collectorId: string, input: CollectorInput): Promise<boolean> {
     try {
       await updateDoc(doc(db, "collectors", collectorId), { ...input, updatedAt: new Date().toISOString() })
+      logActivity("Edited collector", { collection: "collectors", targetId: collectorId, target: input.name })
       return true
     } catch (err) { console.error("collector update failed", err); return false }
   }
@@ -529,6 +537,7 @@ export class FirebaseService {
         })
       batch.delete(doc(db, "collectors", collectorId))
       await batch.commit()
+      logActivity("Deleted collector", { collection: "collectors", targetId: collectorId })
       return true
     } catch (err) { console.error("collector delete failed", err); return false }
   }
@@ -582,6 +591,9 @@ export class FirebaseService {
       }
       if (!collector && pickup.status === "assigned") update.status = "pending"
       await writePickup(pickup, update)
+      logActivity(collector ? "Assigned collector" : "Unassigned collector", {
+        collection: pickup.collection, targetId: pickup.id, target: pickup.customerName, collector: collector?.name,
+      })
       return true
     } catch (err) { console.error("pickup assign failed", err); return false }
   }
@@ -589,6 +601,7 @@ export class FirebaseService {
   static async updatePickupStatus(pickup: CollectorPickup, status: PickupStatus): Promise<boolean> {
     try {
       await writePickup(pickup, { status, updatedAt: new Date().toISOString() })
+      logActivity("Changed status", { collection: pickup.collection, targetId: pickup.id, target: pickup.customerName, status })
       return true
     } catch (err) { console.error("pickup status update failed", err); return false }
   }
@@ -670,6 +683,7 @@ export class FirebaseService {
         createdAt: now,
         updatedAt: now,
       })
+      logActivity("Registered subscriber", { collection: "subscribers", target: input.customerName, plan: input.planId })
       return true
     } catch (err) { console.error("subscriber create failed", err); return false }
   }
@@ -678,6 +692,7 @@ export class FirebaseService {
   static async setSubscriberStatus(id: string, status: string): Promise<boolean> {
     try {
       await updateDoc(doc(db, "subscribers", id), { status, updatedAt: new Date().toISOString() })
+      logActivity("Changed subscriber status", { collection: "subscribers", targetId: id, status })
       return true
     } catch (err) { console.error("subscriber status update failed", err); return false }
   }
@@ -697,6 +712,10 @@ export class FirebaseService {
         ...(row.collection !== "subscribers" ? { paymentStatus: "paid" } : {}),
         updatedAt: now,
       })
+      logActivity("Recorded payment", {
+        collection: row.collection, targetId: row.id, target: row.customerName,
+        amount: payment.amount, method: payment.method, paidUntil: payment.paidUntil,
+      })
       return true
     } catch (err) { console.error("payment record failed", err); return false }
   }
@@ -708,6 +727,7 @@ export class FirebaseService {
       const batch = writeBatch(db)
       rows.forEach((r) => batch.update(doc(db, r.collection, r.id), { renewalReminderRequestedAt: now }))
       await batch.commit()
+      logActivity("Sent renewal reminders", { count: rows.length, target: rows.map((r) => r.customerName).slice(0, 10).join(", ") })
       return true
     } catch (err) { console.error("renewal reminder request failed", err); return false }
   }
@@ -720,6 +740,7 @@ export class FirebaseService {
         whatsAppConfirmation: null,
         updatedAt: new Date().toISOString(),
       })
+      logActivity("Resent subscriber WhatsApp", { collection: "subscribers", targetId: id })
       return true
     } catch (err) { console.error("subscriber resend failed", err); return false }
   }
@@ -727,6 +748,7 @@ export class FirebaseService {
   static async updateSubscriber(id: string, input: SubscriberInput): Promise<boolean> {
     try {
       await updateDoc(doc(db, "subscribers", id), { ...input, updatedAt: new Date().toISOString() })
+      logActivity("Edited subscriber", { collection: "subscribers", targetId: id, target: input.customerName })
       return true
     } catch (err) { console.error("subscriber update failed", err); return false }
   }
@@ -734,6 +756,7 @@ export class FirebaseService {
   static async deleteSubscriber(id: string): Promise<boolean> {
     try {
       await deleteDoc(doc(db, "subscribers", id))
+      logActivity("Deleted subscriber", { collection: "subscribers", targetId: id })
       return true
     } catch (err) { console.error("subscriber delete failed", err); return false }
   }

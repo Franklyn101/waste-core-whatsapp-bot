@@ -3414,6 +3414,21 @@ nextApp.prepare().then(() => {
     }
   })
 
+  // Sub-admin permission switches (must match lib/permissions.ts).
+  const SUB_ADMIN_PERMISSIONS = ["viewRevenue", "recordPayments", "deleteRecords", "sendBroadcasts"]
+
+  // Activity log entries for actions taken through the server.
+  async function logAdminActivity(uid, action, details = {}) {
+    try {
+      const profile = await db.collection("admins").doc(uid).get()
+      await db.collection("activityLog").add({
+        uid, username: profile.data()?.username || "", action, ...details, at: new Date().toISOString(),
+      })
+    } catch (err) {
+      console.error("Activity log failed:", err.message)
+    }
+  }
+
   // Any signed-in, active admin (main or sub).
   async function requireAdmin(req, res, next) {
     try {
@@ -3471,6 +3486,7 @@ nextApp.prepare().then(() => {
         password: creds.password,
         displayName: creds.username,
       })
+      await logAdminActivity(req.adminUid, "Added sub-admin", { target: creds.username })
       await db.collection("admins").doc(user.uid).set({
         username: creds.username,
         role: "sub",
@@ -3499,14 +3515,35 @@ nextApp.prepare().then(() => {
       }
       if (typeof req.body?.active === "boolean") authUpdate.disabled = !req.body.active
 
-      if (!Object.keys(authUpdate).length) return res.status(400).json({ error: "Nothing to update." })
-      await admin.auth().updateUser(req.params.uid, authUpdate)
-      // Sign them out everywhere after a password change or deactivation.
-      await admin.auth().revokeRefreshTokens(req.params.uid)
+      // Permission switches: only known names, true/false.
+      let permissions = null
+      if (req.body?.permissions && typeof req.body.permissions === "object") {
+        permissions = { ...(doc.data().permissions || {}) }
+        for (const [key, value] of Object.entries(req.body.permissions)) {
+          if (!SUB_ADMIN_PERMISSIONS.includes(key) || typeof value !== "boolean") {
+            return res.status(400).json({ error: `Unknown permission: ${key}` })
+          }
+          permissions[key] = value
+        }
+      }
+
+      if (!Object.keys(authUpdate).length && !permissions) return res.status(400).json({ error: "Nothing to update." })
+      if (Object.keys(authUpdate).length) {
+        await admin.auth().updateUser(req.params.uid, authUpdate)
+        // Sign them out everywhere after a password change or deactivation.
+        await admin.auth().revokeRefreshTokens(req.params.uid)
+      }
       await doc.ref.update({
         ...(typeof req.body?.active === "boolean" ? { active: req.body.active } : {}),
+        ...(permissions ? { permissions } : {}),
         updatedAt: new Date().toISOString(),
       })
+      const changes = [
+        authUpdate.password && "reset password",
+        typeof req.body?.active === "boolean" && (req.body.active ? "activated" : "deactivated"),
+        permissions && "changed permissions",
+      ].filter(Boolean).join(", ")
+      await logAdminActivity(req.adminUid, "Updated sub-admin", { target: doc.data().username, changes })
       res.json({ ok: true })
     } catch (err) {
       console.error("sub-admin update failed:", err)
@@ -3522,6 +3559,7 @@ nextApp.prepare().then(() => {
         if (err?.code !== "auth/user-not-found") throw err
       })
       await doc.ref.delete()
+      await logAdminActivity(req.adminUid, "Deleted sub-admin", { target: doc.data().username })
       res.json({ ok: true })
     } catch (err) {
       console.error("sub-admin delete failed:", err)

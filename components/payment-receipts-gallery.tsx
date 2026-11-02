@@ -13,6 +13,9 @@ import { useFilteredRequests } from "@/hooks/use-filtered-data"
 import { servicePrice } from "@/lib/subscriptions"
 import { collection, doc, getDocs, updateDoc } from "firebase/firestore"
 import { db } from "@/lib/firebase"
+import { logActivity } from "@/lib/activity"
+import { useAdminAuth } from "@/lib/admin-auth"
+import { can } from "@/lib/permissions"
 
 // Unified receipt shape pulled from all collections
 interface ReceiptRecord {
@@ -162,6 +165,8 @@ interface PaymentReceiptsGalleryProps {
 }
 
 export function PaymentReceiptsGallery({ searchQuery = "" }: PaymentReceiptsGalleryProps) {
+  const { profile } = useAdminAuth()
+  const mayVerify = can(profile, "recordPayments")
   const [allReceipts, setAllReceipts] = useState<ReceiptRecord[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -197,6 +202,7 @@ export function PaymentReceiptsGallery({ searchQuery = "" }: PaymentReceiptsGall
         receiptVerifiedAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       })
+      logActivity("Verified receipt", { collection: receipt.collection, targetId: receipt.docId, target: receipt.customerName, amount: receipt.amount })
       setAllReceipts((list) => list.map((r) => (r.id === receipt.id ? { ...r, verified: true } : r)))
     } catch (err) {
       console.error("Receipt verification failed:", err)
@@ -367,7 +373,7 @@ export function PaymentReceiptsGallery({ searchQuery = "" }: PaymentReceiptsGall
 
                   <div className="flex items-center justify-between gap-2 pt-1">
                     <VerifiedBadge verified={receipt.verified} />
-                    {!receipt.verified && (
+                    {!receipt.verified && mayVerify && (
                       <Button size="sm" variant="outline" disabled={verifying === receipt.id} onClick={() => markVerified(receipt)}>
                         <BadgeCheck className="w-4 h-4 mr-1" />
                         {verifying === receipt.id ? "Saving..." : "Mark as verified"}

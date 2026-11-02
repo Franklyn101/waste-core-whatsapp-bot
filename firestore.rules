@@ -37,10 +37,18 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // Activity log: admins can add their own entries; only the main admin
+    // can read it, and nobody can change or delete entries.
+    match /activityLog/{id} {
+      allow read: if isMainAdmin();
+      allow create: if isAdmin() && request.resource.data.uid == request.auth.uid;
+      allow update, delete: if false;
+    }
+
     // Everything else (pickups, orders, tickets, collectors, invoices...)
     // is available to any active admin, main or sub.
     match /{collection}/{docId} {
-      allow read, write: if collection != "admins" && collection != "config" && isAdmin();
+      allow read, write: if collection != "admins" && collection != "config" && collection != "activityLog" && isAdmin();
     }
   }
 }

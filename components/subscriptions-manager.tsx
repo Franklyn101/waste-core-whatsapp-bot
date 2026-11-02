@@ -64,6 +64,8 @@ import {
   UserPlus,
 } from "lucide-react"
 import { FirebaseService } from "@/lib/firebase-service"
+import { useAdminAuth } from "@/lib/admin-auth"
+import { can } from "@/lib/permissions"
 import type { PaymentInput, SubscriberInput, SubscriberStatus, SubscriptionRow } from "@/lib/types"
 import {
   SUBSCRIPTION_KINDS,
@@ -188,6 +190,9 @@ interface SubscriptionsManagerProps {
 }
 
 export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerProps) {
+  const { profile } = useAdminAuth()
+  const mayRecordPayments = can(profile, "recordPayments")
+  const mayDelete = can(profile, "deleteRecords")
   const [rows, setRows] = useState<SubscriptionRow[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -601,9 +606,11 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
                             </DropdownMenuItem>
                             {paymentState(r, today).state !== "na" && (
                               <>
-                                <DropdownMenuItem onClick={() => openPayment(r)}>
-                                  <Wallet className="mr-2 h-4 w-4" /> Record payment
-                                </DropdownMenuItem>
+                                {mayRecordPayments && (
+                                  <DropdownMenuItem onClick={() => openPayment(r)}>
+                                    <Wallet className="mr-2 h-4 w-4" /> Record payment
+                                  </DropdownMenuItem>
+                                )}
                                 <DropdownMenuItem
                                   disabled={r.renewalReminder?.status === "sending"}
                                   onClick={() => sendReminders([r])}
@@ -627,9 +634,11 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
                             </DropdownMenuItem>
                             {paymentState(r, today).state !== "na" && (
                               <>
-                                <DropdownMenuItem onClick={() => openPayment(r)}>
-                                  <Wallet className="mr-2 h-4 w-4" /> Record payment
-                                </DropdownMenuItem>
+                                {mayRecordPayments && (
+                                  <DropdownMenuItem onClick={() => openPayment(r)}>
+                                    <Wallet className="mr-2 h-4 w-4" /> Record payment
+                                  </DropdownMenuItem>
+                                )}
                                 <DropdownMenuItem
                                   disabled={r.renewalReminder?.status === "sending"}
                                   onClick={() => sendReminders([r])}
@@ -653,9 +662,11 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
                                 <Play className="mr-2 h-4 w-4" /> Resume
                               </DropdownMenuItem>
                             )}
-                            <DropdownMenuItem className="text-destructive" onClick={() => setDeleting(r)}>
-                              <Trash2 className="mr-2 h-4 w-4" /> Delete
-                            </DropdownMenuItem>
+                            {mayDelete && (
+                              <DropdownMenuItem className="text-destructive" onClick={() => setDeleting(r)}>
+                                <Trash2 className="mr-2 h-4 w-4" /> Delete
+                              </DropdownMenuItem>
+                            )}
                           </DropdownMenuContent>
                         </DropdownMenu>
                       )}

@@ -63,6 +63,8 @@ import {
   Users,
 } from "lucide-react"
 import { FirebaseService } from "@/lib/firebase-service"
+import { useAdminAuth } from "@/lib/admin-auth"
+import { can } from "@/lib/permissions"
 import { WEEK_DAYS, findPlan, planFullLabel } from "@/lib/subscriptions"
 import type { Collector, CollectorInput, CollectorPickup, PickupStatus, SubscriptionRow } from "@/lib/types"
 import { MapPinLink, mapPinUrl } from "@/components/map-pin-link"
@@ -201,6 +203,8 @@ interface CollectorsManagerProps {
 }
 
 export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) {
+  const { profile } = useAdminAuth()
+  const mayDelete = can(profile, "deleteRecords")
   const [collectors, setCollectors] = useState<Collector[]>([])
   const [pickups, setPickups] = useState<CollectorPickup[]>([])
   const [visits, setVisits] = useState<CollectorPickup[]>([])
@@ -578,9 +582,11 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
                               <DropdownMenuItem onClick={() => openEdit(c)}>
                                 <Pencil className="w-4 h-4 mr-2" /> Edit
                               </DropdownMenuItem>
-                              <DropdownMenuItem className="text-destructive" onClick={() => setDeleting(c)}>
-                                <Trash2 className="w-4 h-4 mr-2" /> Delete
-                              </DropdownMenuItem>
+                              {mayDelete && (
+                                <DropdownMenuItem className="text-destructive" onClick={() => setDeleting(c)}>
+                                  <Trash2 className="w-4 h-4 mr-2" /> Delete
+                                </DropdownMenuItem>
+                              )}
                             </DropdownMenuContent>
                           </DropdownMenu>
                         </TableCell>
