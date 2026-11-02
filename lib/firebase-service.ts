@@ -29,6 +29,7 @@ import type {
   SubscriptionRow,
   SubscriptionPayment,
   PaymentInput,
+  GeoPin,
 } from "./types"
 import { findPlan } from "./subscriptions"
 
@@ -67,6 +68,7 @@ async function writePickup(pickup: CollectorPickup, update: Record<string, unkno
     address: pickup.address,
     pickupDate: pickup.pickupDate,
     timeWindow: pickup.timeWindow ?? null,
+    location: pickup.location ?? null,
     serviceType: "subscription",
     serviceLabel: pickup.serviceType,
     ...(pickup.status === "pending" && !("status" in update) ? { status: "pending" } : {}),
@@ -97,6 +99,7 @@ function normalizeRequest(data: any, id: string): WasteRequest {
     bagCount:          data.bagCount ?? null,
     totalAmount:       data.totalAmount ?? null,
     needsReschedule:   data.needsReschedule === true,
+    location:          data.location ?? null,
     createdAt,
     updatedAt,
   }
@@ -110,6 +113,7 @@ function normalizeWasteBagOrder(data: any, id: string): WasteBagOrder {
     customerName:      data.customerName ?? "",
     customerPhone:     data.customerPhone ?? "",
     deliveryAddress:   data.deliveryAddress ?? data.address ?? "",
+    location:          data.location ?? null,
     bagSize:           data.bagSize ?? "small",
     quantity:          data.quantity ?? 1,
     totalAmount:       data.totalAmount ?? 0,
@@ -191,6 +195,7 @@ function normalizeCollectorPickup(data: any, id: string, col: CollectorPickup["c
     collectorId:   data.collectorId ?? null,
     collectorName: data.collectorName ?? "",
     timeWindow:    data.timeWindow ?? "",
+    location:      data.location ?? null,
     subscriberId:  data.subscriberId ?? undefined,
     planId:        data.planId ?? undefined,
     collectorMessage: data.collectorMessage ?? null,
@@ -228,6 +233,7 @@ function normalizeSubscriber(data: any, id: string): SubscriptionRow {
     notes: data.notes ?? "",
     linkedRequestId: data.linkedRequestId ?? null,
     whatsAppConfirmation: data.whatsAppConfirmation ?? null,
+    location: data.location ?? null,
     payment: normalizePayment(data),
     renewalReminder: data.renewalReminder ?? null,
     createdAt: parseDate(data.createdAt),
@@ -261,6 +267,7 @@ function normalizeWhatsAppSubscription(
     status: data.status === "cancelled" ? "cancelled" : "active",
     requestStatus: data.status ?? "pending",
     notes: "",
+    location: data.location ?? null,
     payment: normalizePayment(data),
     renewalReminder: data.renewalReminder ?? null,
     createdAt: parseDate(data.createdAt),
@@ -637,12 +644,18 @@ export class FirebaseService {
   // sendWhatsApp asks the bot to message the customer a confirmation.
   // `payment` carries over the paid-until date of the WhatsApp plan request
   // a subscriber is created from.
-  static async createSubscriber(input: SubscriberInput, sendWhatsApp = false, payment?: SubscriptionPayment): Promise<boolean> {
+  static async createSubscriber(
+    input: SubscriberInput,
+    sendWhatsApp = false,
+    payment?: SubscriptionPayment,
+    location?: GeoPin | null
+  ): Promise<boolean> {
     try {
       const now = new Date().toISOString()
       await addDoc(collection(db, "subscribers"), {
         ...input,
         ...(sendWhatsApp ? { sendWhatsAppConfirmation: true } : {}),
+        ...(location ? { location } : {}),
         ...(payment?.paidUntil ? {
           paidUntil: payment.paidUntil,
           lastPaymentDate: payment.lastPaymentDate,

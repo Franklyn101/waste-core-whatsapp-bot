@@ -77,6 +77,7 @@ import {
   type SubscriptionKind,
 } from "@/lib/subscriptions"
 import { cn } from "@/lib/utils"
+import { MapPinLink } from "@/components/map-pin-link"
 
 const ALL = "__all__"
 
@@ -326,7 +327,8 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
       : await FirebaseService.createSubscriber(
         input,
         sendWhatsApp,
-        rows.find((r) => r.source === "whatsapp" && r.id === input.linkedRequestId)?.payment
+        rows.find((r) => r.source === "whatsapp" && r.id === input.linkedRequestId)?.payment,
+        rows.find((r) => r.source === "whatsapp" && r.id === input.linkedRequestId)?.location
       )
     if (!ok) setError(`Could not save ${input.customerName}. Please try again.`)
   }
@@ -516,6 +518,7 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
                       <div className="flex max-w-56 items-center gap-2">
                         <MapPin className="h-4 w-4 flex-shrink-0 text-gray-400" />
                         <span className="truncate text-sm">{r.address || "—"}</span>
+                        <MapPinLink pin={r.location} />
                       </div>
                     </TableCell>
                     <TableCell>

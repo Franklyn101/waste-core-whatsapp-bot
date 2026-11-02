@@ -65,6 +65,7 @@ import {
 import { FirebaseService } from "@/lib/firebase-service"
 import { WEEK_DAYS, findPlan, planFullLabel } from "@/lib/subscriptions"
 import type { Collector, CollectorInput, CollectorPickup, PickupStatus, SubscriptionRow } from "@/lib/types"
+import { MapPinLink, mapPinUrl } from "@/components/map-pin-link"
 
 const UNASSIGNED = "__unassigned__"
 const ALL = "__all__"
@@ -106,7 +107,9 @@ function toWhatsAppNumber(phone: string): string {
 }
 
 function collectorMessage(pickup: CollectorPickup, collector: Collector): string {
-  const mapLink = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(pickup.address)}`
+  const mapLink = pickup.location
+    ? mapPinUrl(pickup.location)
+    : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(pickup.address)}`
   return [
     `Hello ${collector.name}, you have a new WasteCore pickup.`,
     "",
@@ -162,6 +165,7 @@ function visitsForDate(date: string, subscribers: SubscriptionRow[], saved: Coll
         pickupDate: date,
         serviceType: plan ? planFullLabel(plan) : "Subscription",
         timeWindow: VISIT_TIME_LABELS[s.timeWindow] ?? "",
+        location: s.location ?? null,
         status: "pending",
         collectorId: null,
         collectorName: "",
@@ -643,6 +647,7 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
                         <div className="flex items-center gap-2">
                           <MapPin className="w-4 h-4 text-gray-400" />
                           <span className="text-sm max-w-xs truncate">{v.address || "—"}</span>
+                          <MapPinLink pin={v.location} />
                         </div>
                       </TableCell>
                       <TableCell><Badge variant="outline">{v.serviceType}</Badge></TableCell>
@@ -714,6 +719,7 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
                           <div className="flex items-center gap-2">
                             <MapPin className="w-4 h-4 text-gray-400" />
                             <span className="text-sm max-w-xs truncate">{p.address || "—"}</span>
+                            <MapPinLink pin={p.location} />
                           </div>
                         </TableCell>
                         <TableCell>

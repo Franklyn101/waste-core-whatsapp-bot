@@ -44,6 +44,14 @@ export type CollectorInput = Pick<Collector, "name" | "phone" | "area" | "active
 
 export type PickupCollection = "instantPickups" | "pickupRequests"
 
+// Location pin a customer shared on WhatsApp.
+export interface GeoPin {
+  lat: number
+  lng: number
+  name?: string
+  address?: string
+}
+
 export interface CollectorReport {
   status: "done" | "failed"
   at: string
@@ -71,6 +79,7 @@ export interface CollectorPickup {
   collectorId: string | null
   collectorName: string
   timeWindow?: string
+  location?: GeoPin | null
   // Subscription visits only.
   subscriberId?: string
   planId?: string
@@ -114,6 +123,7 @@ export interface SubscriptionRow extends SubscriberInput {
   // Monthly payments. paidUntil is the date the next payment is due; the
   // bot sets these for WhatsApp payments, admins record the rest.
   payment: SubscriptionPayment
+  location?: GeoPin | null
   // Outcome of the last "Send renewal reminder".
   renewalReminder?: { status: string; at?: string; requestedAt?: string } | null
   createdAt: Date

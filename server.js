@@ -617,7 +617,12 @@ const OPEN_JOB_STATUSES = ["pending", "assigned", "confirmed"]
 const SERVICE_AREA = process.env.SERVICE_AREA || "Yenagoa"
 
 // Directions link; the town is added when the address doesn't name it.
-function mapsLink(address) {
+// Directions: the customer's location pin when they shared one, otherwise a
+// search for the typed address.
+function mapsLink(address, location) {
+  if (Number.isFinite(location?.lat) && Number.isFinite(location?.lng)) {
+    return `https://www.google.com/maps/search/?api=1&query=${location.lat},${location.lng}`
+  }
   const a = String(address || "").trim()
   if (!a) return ""
   const query = a.toLowerCase().includes(SERVICE_AREA.toLowerCase()) ? a : `${a}, ${SERVICE_AREA}`
@@ -674,7 +679,7 @@ async function notifyCollectorIfAssigned(collectionName, docSnap) {
   let status = "failed"
   if (phone) {
     const when = `${shortDay(job.pickupDate)}${job.timeWindow ? `, ${job.timeWindow}` : ""}`
-    const link = mapsLink(job.address)
+    const link = mapsLink(job.address, job.location)
     status = await notifyCustomer(
       phone,
       TEMPLATE_COLLECTOR_PICKUP,
@@ -685,7 +690,7 @@ async function notifyCollectorIfAssigned(collectionName, docSnap) {
         `\u{1F4C5} ${when}`,
         `\u{1F464} ${jobCustomer(job)}`,
         `\u{1F4CD} ${job.address || "No address"}`,
-        ...(link ? [`\u{1F5FA} ${link}`] : []),
+        ...(link ? [`${job.location ? "\u{1F4CC} Pin" : "\u{1F5FA} Map"}: ${link}`] : []),
         `\u{1F6CD} ${jobWhat(job)}`,
         "",
         "Reply *JOBS* to see all your pickups.",
@@ -741,13 +746,13 @@ async function collectorJobsMessage(collector) {
     lines.push("", `*${label ? `${label}, ` : ""}${shortDay(date)}*`)
     for (const j of day) {
       number++
-      const link = mapsLink(j.address)
+      const link = mapsLink(j.address, j.location)
       const report = j.collectorReport?.status === "done" ? "\u2705 Reported done, waiting for admin"
         : j.collectorReport?.status === "failed" ? "\u274C Reported not picked up" : null
       lines.push(
         `*${number}.* ${jobCustomer(j)}`,
         `   \u{1F4CD} ${j.address || "No address"}`,
-        ...(link ? [`   \u{1F5FA} ${link}`] : []),
+        ...(link ? [`   ${j.location ? "\u{1F4CC} Pin" : "\u{1F5FA} Map"}: ${link}`] : []),
         `   \u{1F6CD} ${jobWhat(j)}${j.timeWindow ? ` \u00B7 ${j.timeWindow}` : ""}`,
         ...(report ? [`   ${report}`] : [])
       )
@@ -1297,7 +1302,7 @@ function buildCheckout(d, from) {
       title: `${label.replace(" - ", " plan \u00B7 ")}`,
       details: [
         ...(d.planCategory === "business" && d.businessName ? [`\u{1F3E2} ${d.businessName}`] : []),
-        `\u{1F4CD} ${d.address}`,
+        `\u{1F4CD} ${d.address}${d.location ? " (\u{1F4CC} pin shared)" : ""}`,
         `\u{1F4C5} Starts ${displayDate(d.startDate)}`,
       ],
       totalText: `${naira(amount)}/month`,
@@ -1306,7 +1311,7 @@ function buildCheckout(d, from) {
         customerName: d.planCategory === "business" ? (d.businessName || d.name) : d.name,
         businessName: d.planCategory === "business" ? (d.businessName ?? null) : null,
         contactName: d.name ?? null,
-        customerPhone: from, address: d.address,
+        customerPhone: from, address: d.address, location: d.location ?? null,
         plan: d.upgradePlan, planCategory: d.planCategory ?? null, planLabel: label,
         serviceType: d.serviceType, startDate: d.startDate, totalAmount: amount,
       },
@@ -1324,12 +1329,12 @@ function buildCheckout(d, from) {
       title: "Waste bags",
       details: [
         `\u{1F6CD} ${size} bags \u00D7 ${d.bagQuantity} pack${d.bagQuantity > 1 ? "s" : ""}`,
-        `\u{1F4CD} Deliver to: ${d.address}`,
+        `\u{1F4CD} Deliver to: ${d.address}${d.location ? " (\u{1F4CC} pin shared)" : ""}`,
       ],
       totalText: naira(d.bagTotal),
       doc: {
         customerName: d.name, customerPhone: from, bagSize: d.bagSize, quantity: d.bagQuantity,
-        totalAmount: d.bagTotal, deliveryAddress: d.address, serviceType: "wasteBags",
+        totalAmount: d.bagTotal, deliveryAddress: d.address, location: d.location ?? null, serviceType: "wasteBags",
       },
       doneTitle: "Payment received. Your order is confirmed!",
       nextSteps: "Expect delivery within 1-2 business days.",
@@ -1347,12 +1352,12 @@ function buildCheckout(d, from) {
     title: serviceLabel,
     details: [
       ...(d.bagCount ? [`\u{1F6CD} ${bagsText(d.bagCount)} \u00D7 ${naira(d.pricePerBag)}`] : []),
-      `\u{1F4CD} ${d.address}`,
+      `\u{1F4CD} ${d.address}${d.location ? " (\u{1F4CC} pin shared)" : ""}`,
       when,
     ],
     totalText: naira(amount),
     doc: {
-      customerName: d.name, customerPhone: from, address: d.address,
+      customerName: d.name, customerPhone: from, address: d.address, location: d.location ?? null,
       wasteType: d.wasteType ?? null, pickupDate: d.pickupDate, timeWindow: d.timeWindow ?? null,
       bagCount: d.bagCount ?? null, pricePerBag: d.pricePerBag ?? null, totalAmount: amount ?? null,
       serviceType: d.serviceType, serviceLabel,
@@ -1780,6 +1785,17 @@ nextApp.prepare().then(() => {
       const unsupportedMedia = !hasImage && ["document", "audio", "video", "sticker"].includes(msgType)
       const mediaType = isReceiptDocument && docMime === "application/pdf" ? "pdf" : "image"
 
+      // Shared location pin (📎 → Location).
+      const loc = msgType === "location" ? message.location : null
+      const location = loc && Number.isFinite(Number(loc.latitude)) && Number.isFinite(Number(loc.longitude))
+        ? {
+            lat: Number(loc.latitude),
+            lng: Number(loc.longitude),
+            name: String(loc.name || "").slice(0, 200),
+            address: String(loc.address || "").slice(0, 300),
+          }
+        : null
+
       const messageId = message.id || null
       // `msg` is lowercased for matching commands and menu choices; `rawMsg`
       // keeps what the customer typed for names, addresses and descriptions.
@@ -1787,7 +1803,7 @@ nextApp.prepare().then(() => {
       const displayNumber = value?.metadata?.display_phone_number || null
       return {
         from: normalizedFrom, msg: text.toLowerCase().substring(0, 500), rawMsg: text,
-        hasImage, mediaId, mediaType, unsupportedMedia, messageId, phoneNumberId, displayNumber,
+        hasImage, mediaId, mediaType, unsupportedMedia, messageId, phoneNumberId, displayNumber, location,
       }
     } catch (e) {
       console.error("extractIncoming error:", e)
@@ -2042,7 +2058,7 @@ nextApp.prepare().then(() => {
   }
 
   async function handleIncoming({
-    from, msg, rawMsg = "", hasImage, mediaId, mediaType, unsupportedMedia, messageId, phoneNumberId, displayNumber,
+    from, msg, rawMsg = "", hasImage, mediaId, mediaType, unsupportedMedia, messageId, phoneNumberId, displayNumber, location,
   }) {
     if (displayNumber || phoneNumberId) rememberBusinessNumber(displayNumber, phoneNumberId).catch(() => {})
 
@@ -2086,6 +2102,7 @@ nextApp.prepare().then(() => {
       const profile = await loadCustomer(from)
       if (profile?.name && !session.data.name) session.data.name = profile.name
       if (profile?.businessName && !session.data.businessName) session.data.businessName = profile.businessName
+      if (profile?.lastAddress?.address) session.data.savedAddress = profile.lastAddress
       session.data.profileLoaded = true
     }
 
@@ -2149,8 +2166,7 @@ nextApp.prepare().then(() => {
           session.step = "support_select"
           break
         default: // instant, scheduled
-          await send("Your pickup address?")
-          session.step = "pickup_address"
+          await askAddress("Your pickup address?", "pickup")
       }
     }
 
@@ -2209,6 +2225,82 @@ nextApp.prepare().then(() => {
         await askPickupDate()
         session.step = "pickup_date"
       }
+    }
+
+    // ── Addresses: typed, a location pin, or both ─────────────────────────
+    // Pins can be off in Bayelsa, so a typed address or landmark is always
+    // accepted, and asked for after a pin (SKIP uses the pin alone).
+    const ADDRESS_HOW =
+      "\u270D\uFE0F Type the address with a nearby landmark, e.g. _12 Okaka Road, opposite First Bank_\n" +
+      "\u{1F4CC} and/or share your location: tap \u{1F4CE} \u2192 *Location* \u2192 *Send your current location*"
+    const pinLabel = (loc) => [loc?.name, loc?.address].filter(Boolean).join(", ") || "Location pin"
+
+    const askAddress = async (question, kind) => {
+      await ensureProfile()
+      const saved = session.data.savedAddress
+      await send([
+        `*${question}*`,
+        "",
+        ...(saved ? [`Reply *1* to use your last address:`, `\u{1F4CD} ${saved.address}${saved.location ? " (\u{1F4CC} pin)" : ""}`, "", "Or:"] : []),
+        ADDRESS_HOW,
+      ].join("\n"))
+      session.step = `${kind}_address`
+    }
+
+    // What comes after the address for each service.
+    const afterAddress = async (kind) => {
+      saveCustomer(from, { lastAddress: { address: session.data.address, location: session.data.location ?? null } })
+        .catch((err) => console.error("Could not save the last address:", err.message))
+      if (kind === "upgrade") {
+        await send(`When should your plan start?\n\n${DATE_HINT}`)
+        session.step = "upgrade_date"
+      } else if (kind === "bags") {
+        await startCheckout("bags_payment")
+      } else {
+        await askBagsOrDate()
+      }
+    }
+
+    const handleAddressReply = async (kind) => {
+      if (location) {
+        session.data.location = location
+        await send(
+          "\u{1F4CC} Got your location pin, thanks!\n\n" +
+          "Now *type the address or a landmark* so the collector can find you easily (pins can be a little off).\n\n" +
+          "Reply *SKIP* to use the pin only."
+        )
+        session.step = `${kind}_address_details`
+        return
+      }
+      if (msg === "1" && session.data.savedAddress) {
+        session.data.address = session.data.savedAddress.address
+        session.data.location = session.data.savedAddress.location ?? null
+        return afterAddress(kind)
+      }
+      if (!rawMsg.trim()) {
+        await send(`Please send your address.\n\n${ADDRESS_HOW}`)
+        return
+      }
+      session.data.address = rawMsg.substring(0, 300)
+      session.data.location = null
+      await afterAddress(kind)
+    }
+
+    const handleAddressDetails = async (kind) => {
+      if (location) {
+        session.data.location = location
+        await send("\u{1F4CC} Pin updated. Now type the address or a landmark, or reply *SKIP*.")
+        return
+      }
+      if (/^skip[\s.!]*$/.test(msg)) {
+        session.data.address = pinLabel(session.data.location)
+      } else if (rawMsg.trim()) {
+        session.data.address = rawMsg.substring(0, 300)
+      } else {
+        await send("Please type the address or a landmark, or reply *SKIP* to use the pin only.")
+        return
+      }
+      await afterAddress(kind)
     }
 
     const DATE_HINT = "Reply *today*, *tomorrow* or a date like 30/03/2026."
@@ -2341,14 +2433,20 @@ nextApp.prepare().then(() => {
           else if (msg === "3") session.data.weeklyPlan = "weekly_3"
           else { await send("Please reply 1, 2, or 3."); break }
           session.data.serviceType = session.data.weeklyPlan
-          await send("Your pickup address?")
-          session.step = "pickup_address"
+          await askAddress("Your pickup address?", "pickup")
           break
 
         // ── INSTANT & SCHEDULED PICKUP FLOW ────────────────────────────────
         case "pickup_address":
-          session.data.address = rawMsg.substring(0, 300)
-          await askBagsOrDate()
+        case "upgrade_address":
+        case "bags_address":
+          await handleAddressReply(session.step.replace("_address", ""))
+          break
+
+        case "pickup_address_details":
+        case "upgrade_address_details":
+        case "bags_address_details":
+          await handleAddressDetails(session.step.replace("_address_details", ""))
           break
 
         // Waste type is no longer asked; kept for conversations already at this step.
@@ -2440,15 +2538,9 @@ nextApp.prepare().then(() => {
           if (!["1", "2", "3"].includes(msg)) { await send("Please reply 1, 2, or 3."); break }
           session.data.upgradePlan = `${session.data.planCategory || "business"}_${msg}`
           session.data.serviceType = `upgrade_${session.data.upgradePlan}`
-          await send("Your pickup address for this plan?")
-          session.step = "upgrade_address"
+          await askAddress("Your pickup address for this plan?", "upgrade")
           break
 
-        case "upgrade_address":
-          session.data.address = rawMsg.substring(0, 300)
-          await send(`When should your plan start?\n\n${DATE_HINT}`)
-          session.step = "upgrade_date"
-          break
 
         case "upgrade_date": {
           const date = await readFutureDate()
@@ -2486,15 +2578,10 @@ nextApp.prepare().then(() => {
             }
             session.data.bagQuantity = qty
             session.data.bagTotal = SERVICE_PRICES[`wasteBags_${session.data.bagSize}`] * qty
-            await send("Delivery address?")
-            session.step = "bags_address"
+            await askAddress("Delivery address?", "bags")
           }
           break
 
-        case "bags_address":
-          session.data.address = rawMsg.substring(0, 300)
-          await startCheckout("bags_payment")
-          break
 
         case "bags_payment":
           if (await saveReceiptBooking()) session.step = "done"

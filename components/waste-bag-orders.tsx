@@ -33,6 +33,7 @@ import { AdvancedFilters, type FilterOptions } from "@/components/advanced-filte
 import { useFilteredRequests } from "@/hooks/use-filtered-data"
 import { FirebaseService } from "@/lib/firebase-service"
 import type { WasteBagOrder } from "@/lib/types"
+import { MapPinLink } from "@/components/map-pin-link"
 
 interface WasteBagOrdersTableProps {
   searchQuery?: string
@@ -196,6 +197,7 @@ export function WasteBagOrdersTable({ searchQuery = "" }: WasteBagOrdersTablePro
                     <div className="flex items-center gap-2">
                       <MapPin className="w-4 h-4 text-gray-400" />
                       <span className="text-sm max-w-xs truncate">{order.deliveryAddress}</span>
+                      <MapPinLink pin={(order as any).location} />
                     </div>
                   </TableCell>
 
