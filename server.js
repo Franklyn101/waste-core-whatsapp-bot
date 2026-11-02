@@ -826,6 +826,8 @@ function setupCollectorSummaries() {
   const run = () => {
     sendCollectorSummaries().catch((err) => console.error("Collector summary failed:", err))
     sendAdminDigest().catch((err) => console.error("Admin digest failed:", err))
+    sendAutomaticRenewalReminders().catch((err) => console.error("Automatic renewal reminders failed:", err))
+    sendPickupReminders().catch((err) => console.error("Pickup reminders failed:", err))
   }
   run()
   setInterval(run, 10 * 60 * 1000).unref()
@@ -977,6 +979,124 @@ async function sendAdminDigest() {
     section: "subscriptions",
     title: "Subscriptions to renew",
     body: [expired && `${expired} expired`, expiring && `${expiring} expiring this week`].filter(Boolean).join(", ") + ". Send renewal reminders from Subscriptions.",
+  })
+}
+
+// ================= AUTOMATIC REMINDERS =================
+// Customers with a pickup tomorrow get a reminder in the evening, and
+// subscriptions get a renewal reminder a few days before they expire.
+// Customers may not have messaged recently, so the pickup reminder needs an
+// approved template (WAPI_TEMPLATE_PICKUP_REMINDER), category Utility:
+//   name: "pickup_reminder"
+//   body: "Hello {{1}}, a reminder that your WasteCore pickup is tomorrow,
+//          {{2}}, at {{3}}. Please have your waste bagged and ready.
+//          Reply HI if you need to make a change."
+const TEMPLATE_PICKUP_REMINDER = process.env.WAPI_TEMPLATE_PICKUP_REMINDER || "pickup_reminder"
+const PICKUP_REMINDER_HOUR = Number(process.env.PICKUP_REMINDER_HOUR || 17) // Nigerian time
+// Automatic renewal reminder this many days before paidUntil (0 turns it off).
+const AUTO_RENEWAL_DAYS_BEFORE = Number(process.env.AUTO_RENEWAL_DAYS_BEFORE ?? 3)
+const WEEKDAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+
+const lagosHour = (now = new Date()) =>
+  Number(new Intl.DateTimeFormat("en-GB", { timeZone: "Africa/Lagos", hour: "numeric", hourCycle: "h23" }).format(now))
+
+// Runs `task` at most once per day, after `fromHour` and before `toHour`.
+async function oncePerDay(markerId, fromHour, toHour, task) {
+  const hour = lagosHour()
+  if (hour < fromHour || hour >= toHour) return
+  const today = lagosToday()
+  const markerRef = db.collection("config").doc(markerId)
+  const claimed = await db.runTransaction(async (t) => {
+    const snap = await t.get(markerRef)
+    if (snap.exists && snap.data().lastDate === today) return false
+    t.set(markerRef, { lastDate: today, ranAt: new Date().toISOString() }, { merge: true })
+    return true
+  })
+  if (claimed) await task(today)
+}
+
+// Active subscriptions: dashboard subscribers plus WhatsApp plans not yet
+// managed as subscribers. Returns [{ collection, id, data }].
+async function activeSubscriptions() {
+  const [subscribers, requests] = await Promise.all([
+    db.collection("subscribers").get(),
+    db.collection("upgradeRequests").get(),
+  ])
+  const linked = new Set(subscribers.docs.map((d) => d.data().linkedRequestId).filter(Boolean))
+  return [
+    ...subscribers.docs.filter((d) => d.data().status === "active").map((d) => ({ collection: "subscribers", id: d.id, ref: d.ref, data: d.data() })),
+    ...requests.docs.filter((d) => !linked.has(d.id) && d.data().status !== "cancelled")
+      .map((d) => ({ collection: "upgradeRequests", id: d.id, ref: d.ref, data: d.data() })),
+  ]
+}
+
+async function sendAutomaticRenewalReminders() {
+  if (!(AUTO_RENEWAL_DAYS_BEFORE > 0)) return
+  await oncePerDay("autoRenewalReminders", COLLECTOR_SUMMARY_HOUR, 12, async (today) => {
+    let count = 0
+    for (const sub of await activeSubscriptions()) {
+      const paidUntil = sub.data.paidUntil
+      if (!paidUntil || !monthlyPrice(subscriptionPlanId(sub.data))) continue
+      const daysLeft = Math.round((Date.parse(`${paidUntil}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86400000)
+      // Within the window (also catches a day missed while the server was
+      // down), once per paid period; renewing moves paidUntil and re-arms it.
+      if (daysLeft < 0 || daysLeft > AUTO_RENEWAL_DAYS_BEFORE) continue
+      if (sub.data.autoRenewalReminderFor === paidUntil) continue
+      await sub.ref.update({ autoRenewalReminderFor: paidUntil, renewalReminderRequestedAt: new Date().toISOString() })
+      count++
+    }
+    if (count) console.log(`Automatic renewal reminders requested for ${count} subscription(s)`)
+  })
+}
+
+async function sendPickupReminders() {
+  await oncePerDay("pickupReminders", PICKUP_REMINDER_HOUR, 21, async (today) => {
+    const tomorrow = addDays(today, 1)
+    const weekday = WEEKDAY_NAMES[new Date(`${tomorrow}T00:00:00Z`).getUTCDay()]
+    // phone -> { name, when, address }; one reminder per customer.
+    const due = new Map()
+    const add = (phone, name, timeWindow, address) => {
+      const id = toWhatsAppId(phone)
+      if (!id || due.has(id)) return
+      due.set(id, { name, when: `${shortDay(tomorrow)}${timeWindow ? `, ${timeWindow}` : ""}`, address })
+    }
+
+    const [scheduled, instant] = await Promise.all([
+      db.collection("pickupRequests").where("pickupDate", "==", tomorrow).get(),
+      db.collection("instantPickups").where("pickupDate", "==", tomorrow).get(),
+    ])
+    for (const d of [...scheduled.docs, ...instant.docs]) {
+      const job = d.data()
+      if (OPEN_JOB_STATUSES.includes(job.status)) add(job.customerPhone, job.customerName, job.timeWindow, job.address)
+    }
+    for (const sub of await activeSubscriptions()) {
+      const s = sub.data
+      if (sub.collection !== "subscribers") continue // WhatsApp plans have no pickup days until scheduled
+      if (!Array.isArray(s.pickupDays) || !s.pickupDays.includes(weekday)) continue
+      if (s.startDate && s.startDate > tomorrow) continue
+      if (s.paidUntil && s.paidUntil < tomorrow) continue // expired: the renewal reminder covers it
+      add(s.customerPhone, s.customerName, SUBSCRIPTION_TIME_WINDOWS[s.timeWindow], s.address)
+    }
+
+    let sent = 0
+    for (const [phone, r] of due) {
+      const name = String(r.name || "").trim() || "there"
+      const status = await notifyCustomer(
+        phone,
+        TEMPLATE_PICKUP_REMINDER,
+        [name, r.when, r.address || "your address"],
+        [
+          `\u23F0 *Pickup reminder*`,
+          "",
+          `Hello ${name}, your WasteCore pickup is *tomorrow, ${r.when}*.`,
+          ...(r.address ? [`\u{1F4CD} ${r.address}`] : []),
+          "",
+          "Please have your waste bagged and ready. Reply *hi* if you need to make a change.",
+        ].join("\n")
+      )
+      if (status !== "failed") sent++
+    }
+    console.log(`Pickup reminders sent to ${sent} of ${due.size} customer(s) for ${tomorrow}`)
   })
 }
 
