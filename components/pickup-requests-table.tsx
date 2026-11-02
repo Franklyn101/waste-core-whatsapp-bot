@@ -212,7 +212,7 @@ export function PickupRequestsTable({ searchQuery = "" }: PickupRequestsTablePro
                     <div className="flex items-center gap-2">
                       <MapPin className="w-4 h-4 text-muted-foreground" />
                       <span className="text-sm max-w-xs truncate">{request.address}</span>
-                      <MapPinLink pin={(request as any).location} />
+                      <MapPinLink pin={(request as any).location} outsideArea={(request as any).outsideArea} />
                     </div>
                   </TableCell>
                   <TableCell>

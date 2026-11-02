@@ -416,6 +416,11 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
             ))}
           </SelectContent>
         </Select>
+        {p.rating && (
+          <span className="text-[11px] text-amber-600" title={p.rating.comment || undefined}>
+            {"★".repeat(p.rating.stars)}{"☆".repeat(5 - p.rating.stars)} customer rating
+          </span>
+        )}
         {report && isOpen(p) && (
           <div className="max-w-44 text-[11px]">
             {report.status === "done" ? (
@@ -647,7 +652,7 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
                         <div className="flex items-center gap-2">
                           <MapPin className="w-4 h-4 text-gray-400" />
                           <span className="text-sm max-w-xs truncate">{v.address || "—"}</span>
-                          <MapPinLink pin={v.location} />
+                          <MapPinLink pin={v.location} outsideArea={(v as any).outsideArea} />
                         </div>
                       </TableCell>
                       <TableCell><Badge variant="outline">{v.serviceType}</Badge></TableCell>
@@ -719,7 +724,7 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
                           <div className="flex items-center gap-2">
                             <MapPin className="w-4 h-4 text-gray-400" />
                             <span className="text-sm max-w-xs truncate">{p.address || "—"}</span>
-                            <MapPinLink pin={p.location} />
+                            <MapPinLink pin={p.location} outsideArea={(p as any).outsideArea} />
                           </div>
                         </TableCell>
                         <TableCell>

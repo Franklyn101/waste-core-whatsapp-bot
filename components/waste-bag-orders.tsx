@@ -197,7 +197,7 @@ export function WasteBagOrdersTable({ searchQuery = "" }: WasteBagOrdersTablePro
                     <div className="flex items-center gap-2">
                       <MapPin className="w-4 h-4 text-gray-400" />
                       <span className="text-sm max-w-xs truncate">{order.deliveryAddress}</span>
-                      <MapPinLink pin={(order as any).location} />
+                      <MapPinLink pin={(order as any).location} outsideArea={(order as any).outsideArea} />
                     </div>
                   </TableCell>
 

@@ -80,6 +80,9 @@ export interface CollectorPickup {
   collectorName: string
   timeWindow?: string
   location?: GeoPin | null
+  outsideArea?: boolean
+  // Customer's rating after the pickup.
+  rating?: { stars: number; comment?: string } | null
   // Subscription visits only.
   subscriberId?: string
   planId?: string

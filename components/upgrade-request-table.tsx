@@ -86,6 +86,8 @@ export function UpgradeRequestsTable({ searchQuery = "" }: UpgradeRequestsTableP
             paymentReceiptUrl: data.paymentReceiptUrl ?? "",
             paymentMethod:     data.paymentMethod ?? "",
             paymentReference:  data.paymentReference ?? "",
+            location:          data.location ?? null,
+            outsideArea:       data.outsideArea === true,
             status:            data.status ?? "pending",
             createdAt:         toDate(data.createdAt),
             updatedAt:         toDate(data.updatedAt || data.createdAt),
@@ -215,7 +217,7 @@ export function UpgradeRequestsTable({ searchQuery = "" }: UpgradeRequestsTableP
                     <div className="flex items-center gap-2">
                       <MapPin className="w-4 h-4 text-gray-400" />
                       <span className="text-sm max-w-xs truncate">{request.address}</span>
-                      <MapPinLink pin={(request as any).location} />
+                      <MapPinLink pin={(request as any).location} outsideArea={(request as any).outsideArea} />
                     </div>
                   </TableCell>
                   <TableCell>

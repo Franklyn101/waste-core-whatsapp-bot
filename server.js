@@ -442,6 +442,7 @@ function setupStatusListeners() {
                 [date || "today"],
                 `\u2705 *Pickup completed*\n\nYour pickup${date ? ` on ${date}` : ""} has been completed. Thank you for choosing WasteCore! \u267B\uFE0F`
               )
+              if (COLLECTOR_COLLECTIONS.includes(collectionName)) await askForRating(collectionName, change.doc.id, data)
               // Subscription visits are covered by the monthly plan: no invoice.
               if (collectionName === "subscriptionVisits") return
               const verified = paymentVerified(data)
@@ -950,6 +951,12 @@ function newActivityAlert(collectionName, id, data) {
   const paid = data.paymentMethod === "paystack" ? ` · ${naira(data.totalAmount ?? 0)} paid (Paystack)`
     : data.paymentReceiptUrl ? " · receipt sent, verify payment" : ""
   const key = `new_${collectionName}_${id}`
+  const area = data.outsideArea ? " \u26A0\uFE0F outside service area" : ""
+  const alert = newActivityAlertFor(collectionName, data, name, paid, key)
+  return alert && { ...alert, body: `${alert.body}${area}` }
+}
+
+function newActivityAlertFor(collectionName, data, name, paid, key) {
   switch (collectionName) {
     case "instantPickups":
       return { key, type: "booking", section: "instant-pickups", title: "New instant pickup",
@@ -1007,6 +1014,57 @@ async function sendAdminDigest() {
     title: "Subscriptions to renew",
     body: [expired && `${expired} expired`, expiring && `${expiring} expiring this week`].filter(Boolean).join(", ") + ". Send renewal reminders from Subscriptions.",
   })
+}
+
+// ================= RATINGS =================
+// After a pickup is completed the customer is asked for 1-5 stars (a
+// tappable list; it reaches them if they messaged within 24 hours). Their
+// answer is accepted for RATING_DAYS, also typed as a single digit. Low
+// ratings ask what went wrong and alert the admins.
+const RATING_DAYS = 3
+const RATING_OPTIONS = [
+  { id: "rate_5", title: "\u2B50\u2B50\u2B50\u2B50\u2B50 Excellent" },
+  { id: "rate_4", title: "\u2B50\u2B50\u2B50\u2B50 Good" },
+  { id: "rate_3", title: "\u2B50\u2B50\u2B50 Okay" },
+  { id: "rate_2", title: "\u2B50\u2B50 Poor" },
+  { id: "rate_1", title: "\u2B50 Very poor" },
+]
+
+async function askForRating(collectionName, id, job) {
+  const phone = toWhatsAppId(job.customerPhone)
+  if (!phone || job.rating) return
+  await saveCustomer(phone, {
+    pendingRating: { collection: collectionName, id, until: new Date(Date.now() + RATING_DAYS * 86400000).toISOString() },
+  })
+  const body = "\u{1F64F} *How was your pickup?*\n\nYour rating helps us improve. Tap below, or reply with a number from 1 (very poor) to 5 (excellent)."
+  const sent = await sendWhatsAppChoices(phone, { body, options: RATING_OPTIONS, button: "Rate pickup" })
+  if (!sent) await sendWhatsAppMessage(phone, body)
+}
+
+// Service area: a shared pin further than SERVICE_RADIUS_KM from the
+// centre of SERVICE_AREA is flagged (the customer can still book).
+const SERVICE_CENTER = String(process.env.SERVICE_CENTER || "4.9267,6.2676").split(",").map(Number) // Yenagoa
+const SERVICE_RADIUS_KM = Number(process.env.SERVICE_RADIUS_KM || 30)
+// Instant pickups booked after this hour (Nigerian time) are collected the next day.
+const INSTANT_CUTOFF_HOUR = Number(process.env.INSTANT_CUTOFF_HOUR || 16)
+
+function distanceKm(a, b) {
+  const rad = (d) => (d * Math.PI) / 180
+  const dLat = rad(b.lat - a.lat)
+  const dLng = rad(b.lng - a.lng)
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLng / 2) ** 2
+  return 2 * 6371 * Math.asin(Math.sqrt(h))
+}
+
+function outsideServiceArea(location) {
+  if (!Number.isFinite(location?.lat) || SERVICE_CENTER.some((n) => !Number.isFinite(n))) return false
+  return distanceKm({ lat: SERVICE_CENTER[0], lng: SERVICE_CENTER[1] }, location) > SERVICE_RADIUS_KM
+}
+
+const instantCutoffPassed = () => lagosHour() >= INSTANT_CUTOFF_HOUR
+const cutoffLabel = () => {
+  const h = INSTANT_CUTOFF_HOUR
+  return `${h % 12 || 12}${h < 12 ? "am" : "pm"}`
 }
 
 // ================= AUTOMATIC REMINDERS =================
@@ -1506,7 +1564,7 @@ function buildCheckout(d, from) {
         customerName: d.planCategory === "business" ? (d.businessName || d.name) : d.name,
         businessName: d.planCategory === "business" ? (d.businessName ?? null) : null,
         contactName: d.name ?? null,
-        customerPhone: from, address: d.address, location: d.location ?? null,
+        customerPhone: from, address: d.address, location: d.location ?? null, outsideArea: d.outsideArea === true,
         plan: d.upgradePlan, planCategory: d.planCategory ?? null, planLabel: label,
         serviceType: d.serviceType, startDate: d.startDate, totalAmount: amount,
       },
@@ -1529,7 +1587,7 @@ function buildCheckout(d, from) {
       totalText: naira(d.bagTotal),
       doc: {
         customerName: d.name, customerPhone: from, bagSize: d.bagSize, quantity: d.bagQuantity,
-        totalAmount: d.bagTotal, deliveryAddress: d.address, location: d.location ?? null, serviceType: "wasteBags",
+        totalAmount: d.bagTotal, deliveryAddress: d.address, location: d.location ?? null, outsideArea: d.outsideArea === true, serviceType: "wasteBags",
       },
       doneTitle: "Payment received. Your order is confirmed!",
       nextSteps: "Expect delivery within 1-2 business days.",
@@ -1552,7 +1610,7 @@ function buildCheckout(d, from) {
     ],
     totalText: naira(amount),
     doc: {
-      customerName: d.name, customerPhone: from, address: d.address, location: d.location ?? null,
+      customerName: d.name, customerPhone: from, address: d.address, location: d.location ?? null, outsideArea: d.outsideArea === true,
       wasteType: d.wasteType ?? null, pickupDate: d.pickupDate, timeWindow: d.timeWindow ?? null,
       bagCount: d.bagCount ?? null, pricePerBag: d.pricePerBag ?? null, totalAmount: amount ?? null,
       serviceType: d.serviceType, serviceLabel,
@@ -2645,9 +2703,21 @@ nextApp.prepare().then(() => {
       }
     }
 
+    // A pin far outside the service area is flagged (booking still allowed).
+    const checkServiceArea = async (loc) => {
+      session.data.outsideArea = outsideServiceArea(loc)
+      if (session.data.outsideArea) {
+        await send(
+          `\u26A0\uFE0F This location looks outside our current service area (${SERVICE_AREA}). ` +
+          "You can still book, and our team will confirm with you before the pickup."
+        )
+      }
+    }
+
     const handleAddressReply = async (kind) => {
       if (location) {
         session.data.location = location
+        await checkServiceArea(location)
         await sendChoices({
           body: "\u{1F4CC} Got your location pin, thanks!\n\n" +
             "Now *type the address or a landmark* so the collector can find you easily (pins can be a little off).",
@@ -2662,6 +2732,7 @@ nextApp.prepare().then(() => {
       if (msg === "1" && session.data.savedAddress) {
         session.data.address = session.data.savedAddress.address
         session.data.location = session.data.savedAddress.location ?? null
+        session.data.outsideArea = outsideServiceArea(session.data.location)
         return afterAddress(kind)
       }
       if (!rawMsg.trim()) {
@@ -2670,12 +2741,14 @@ nextApp.prepare().then(() => {
       }
       session.data.address = rawMsg.substring(0, 300)
       session.data.location = null
+      session.data.outsideArea = false
       await afterAddress(kind)
     }
 
     const handleAddressDetails = async (kind) => {
       if (location) {
         session.data.location = location
+        await checkServiceArea(location)
         await send("\u{1F4CC} Pin updated. Now type the address or a landmark, or reply *SKIP*.")
         return
       }
@@ -2697,9 +2770,16 @@ nextApp.prepare().then(() => {
       options: [{ id: "today", title: "Today" }, { id: "tomorrow", title: "Tomorrow" }],
       fallback: `${question}\n\n${DATE_HINT}`,
     })
-    const askPickupDate = () => askDate(
-      session.data.serviceType === "scheduled" ? "Which date should we come?" : "When should we pick up?"
-    )
+    const askPickupDate = () => {
+      if (session.data.serviceType === "instant" && instantCutoffPassed()) {
+        return sendChoices({
+          body: `When should we pick up?\n\nInstant pickups booked after ${cutoffLabel()} are collected the next day. Tap Tomorrow or type a later date like 30/03/2026.`,
+          options: [{ id: "tomorrow", title: "Tomorrow" }],
+          fallback: `When should we pick up?\n\nInstant pickups booked after ${cutoffLabel()} are collected the next day. Reply *tomorrow* or a later date like 30/03/2026.`,
+        })
+      }
+      return askDate(session.data.serviceType === "scheduled" ? "Which date should we come?" : "When should we pick up?")
+    }
 
     // Reads a date reply; tells the customer what's wrong and returns null
     // if it isn't a valid date from today on.
@@ -2740,6 +2820,64 @@ nextApp.prepare().then(() => {
     }
 
     try {
+      // ── Rating replies (tapped stars, or a single digit while idle) ─────
+      const ratingTap = msg.match(/^rate_([1-5])$/)
+      if (ratingTap || ((session.step === "0" || session.step === "done") && /^[1-5]$/.test(msg))) {
+        const profile = await loadCustomer(from)
+        const pending = profile?.pendingRating
+        if (pending && Date.parse(pending.until) > Date.now()) {
+          const stars = Number(ratingTap ? ratingTap[1] : msg)
+          const jobRef = db.collection(pending.collection).doc(pending.id)
+          const job = (await jobRef.get()).data() || {}
+          await jobRef.update({ rating: { stars, at: new Date().toISOString() } })
+          await saveCustomer(from, { pendingRating: null })
+          if (stars <= 3) {
+            await notifyAdmins({
+              key: `rating_${pending.collection}_${pending.id}`,
+              type: "support",
+              section: "collectors",
+              title: `${"\u2B50".repeat(stars)} Low rating (${stars}/5)`,
+              body: `${job.customerName || normalizePhone(from)}${job.collectorName ? ` · collector ${job.collectorName}` : ""}. Waiting for their comment.`,
+            })
+            session = { step: "rating_comment", data: { ratingFor: pending, stars } }
+            await send("We're sorry it wasn't great. \u{1F64F} What went wrong? Your answer goes straight to our team.")
+            await sessionsRef.set(session)
+          } else {
+            await send(`Thank you for the ${stars}-star rating! \u{1F49A} Reply *hi* anytime to book again.`)
+          }
+          return
+        }
+        if (ratingTap) {
+          await send("Thanks! This pickup was already rated. Reply *hi* to see the menu.")
+          return
+        }
+      }
+
+      if (session.step === "rating_comment") {
+        const { ratingFor, stars } = session.data
+        const comment = rawMsg.trim().slice(0, 500)
+        const jobRef = db.collection(ratingFor.collection).doc(ratingFor.id)
+        const job = (await jobRef.get()).data() || {}
+        const now = new Date().toISOString()
+        await jobRef.update({ rating: { ...(job.rating || { stars }), comment } })
+        await db.collection("supportTickets").add({
+          ticketId: `TKT-${Date.now().toString().slice(-6)}`,
+          customerName: job.customerName || "",
+          customerPhone: from,
+          category: "Pickup feedback",
+          message: `${stars}/5 stars${job.collectorName ? ` (collector ${job.collectorName})` : ""}: ${comment || "(no comment)"}`,
+          contactTime: "anytime",
+          relatedPickupId: ratingFor.id,
+          relatedCollection: ratingFor.collection,
+          status: "open",
+          createdAt: now,
+          updatedAt: now,
+        })
+        await send("Thank you for telling us. Our team will look into it and may contact you.")
+        await sessionsRef.delete().catch(() => {})
+        return
+      }
+
       // ── Active request check (only at conversation start) ────────────────
       if (session.step === "0" || session.step === "0.5") {
         const [active] = await findActiveBookings(from)
@@ -2870,8 +3008,12 @@ nextApp.prepare().then(() => {
         }
 
         case "pickup_date": {
-          const date = await readFutureDate()
+          let date = await readFutureDate()
           if (!date) break
+          if (session.data.serviceType === "instant" && date === lagosToday() && instantCutoffPassed()) {
+            date = addDays(date, 1)
+            await send(`\u{1F552} Instant pickups booked after ${cutoffLabel()} are collected the next day, so we've set yours for *tomorrow, ${displayDate(date)}*.`)
+          }
           session.data.pickupDate = date
           if (session.data.serviceType === "scheduled") {
             await sendChoices({
