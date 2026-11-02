@@ -8,6 +8,7 @@ const { v2: cloudinary } = require("cloudinary")
 const axios = require("axios")
 const crypto = require("crypto")
 const webpush = require("web-push")
+const PDFDocument = require("pdfkit")
 
 // ================= NEXT.JS =================
 const dev = process.env.NODE_ENV !== "production"
@@ -395,6 +396,10 @@ function setupStatusListeners() {
           if (change.type !== "removed" && collectionName === "upgradeRequests") {
             await setPaidUntilOnceVerified(change.doc)
             await sendRenewalReminderIfRequested("upgradeRequests", change.doc)
+            await issueSubscriptionReceipts("upgradeRequests", change.doc, isInitial)
+          }
+          if (change.type !== "removed" && RECEIPT_BOOKING_COLLECTIONS.includes(collectionName)) {
+            await issueBookingReceipt(collectionName, change.doc)
           }
 
           // Record the current status on existing/new docs without notifying,
@@ -1016,6 +1021,165 @@ async function sendAdminDigest() {
   })
 }
 
+// ================= RECEIPTS =================
+// Every confirmed payment gets a numbered PDF receipt (WC-000001...),
+// stored in receipts/{token} and served at /receipts/<token>.pdf. The
+// customer is sent the PDF on WhatsApp (it arrives if they messaged within
+// 24 hours; otherwise a link is sent as text, and admins can open it from
+// the dashboard).
+const RECEIPT_BOOKING_COLLECTIONS = ["instantPickups", "pickupRequests", "wasteBagOrders"]
+const RECEIPT_SERVICE_LABELS = {
+  instantPickups: "Instant pickup",
+  pickupRequests: "Scheduled pickup",
+  wasteBagOrders: "Waste bags",
+}
+const METHOD_NAMES = { paystack: "Paystack", bank_transfer: "Bank transfer", cash: "Cash", pos: "POS", other: "Other" }
+
+async function nextReceiptNumber() {
+  const ref = db.collection("config").doc("receiptCounter")
+  const n = await db.runTransaction(async (t) => {
+    const snap = await t.get(ref)
+    const next = (snap.exists ? Number(snap.data().next) || 1 : 1)
+    t.set(ref, { next: next + 1 }, { merge: true })
+    return next
+  })
+  return `WC-${String(n).padStart(6, "0")}`
+}
+
+async function issueReceipt({ customerName, customerPhone, description, amount, method, reference, paidOn, source }) {
+  const token = crypto.randomBytes(12).toString("base64url")
+  const number = await nextReceiptNumber()
+  await db.collection("receipts").doc(token).set({
+    number, customerName: customerName || "", customerPhone: normalizePhone(customerPhone || ""),
+    description, amount, method: method || "other", reference: reference || "", paidOn: paidOn || lagosToday(),
+    source, createdAt: new Date().toISOString(),
+  })
+  const phone = toWhatsAppId(customerPhone)
+  if (phone && PUBLIC_BASE_URL) {
+    const url = `${PUBLIC_BASE_URL}/receipts/${token}.pdf`
+    const caption = `\u{1F9FE} Receipt ${number} \u00B7 ${naira(amount)} \u00B7 ${description}. Thank you for choosing WasteCore!`
+    const sent = await sendWhatsAppMedia(phone, { type: "document", url, filename: `WasteCore-receipt-${number}.pdf`, caption })
+    if (!sent) await sendWhatsAppMessage(phone, `${caption}\n\nDownload: ${url}`)
+  }
+  return { token, number }
+}
+
+// Paid pickups and bag orders (Paystack, or a bank transfer once verified).
+// Only payments from the last 2 days, so a restart never re-sends old ones.
+async function issueBookingReceipt(collectionName, docSnap) {
+  const data = docSnap.data()
+  if (data.receiptNumber || !paymentVerified(data) || data.status === "cancelled") return
+  const paidAt = data.paidAt || data.receiptVerifiedAt
+  if (!paidAt || Date.now() - Date.parse(paidAt) > 2 * 86400000) return
+  const amount = Number(data.totalAmount) || 0
+  if (!amount) return
+  try {
+    await docSnap.ref.update({ receiptNumber: "issuing" }, { lastUpdateTime: docSnap.updateTime })
+  } catch {
+    return // changed meanwhile; the next snapshot handles it
+  }
+  const what = data.bagCount ? ` (${bagsText(data.bagCount)})` : data.bagSize ? ` (${data.bagSize} \u00D7 ${data.quantity ?? 1})` : ""
+  const { token, number } = await issueReceipt({
+    customerName: data.customerName, customerPhone: data.customerPhone,
+    description: `${RECEIPT_SERVICE_LABELS[collectionName]}${what}${data.pickupDate ? `, ${displayDate(data.pickupDate)}` : ""}`,
+    amount, method: data.paymentMethod, reference: data.paymentReference, paidOn: String(paidAt).slice(0, 10),
+    source: { collection: collectionName, id: docSnap.id },
+  })
+  await docSnap.ref.update({ receiptNumber: number, receiptToken: token })
+}
+
+// Subscription payments (first month, renewals, payments recorded on the
+// dashboard) are in payments[]; receiptCount says how many have receipts.
+// Payments already there when the server starts are not re-sent.
+async function issueSubscriptionReceipts(collectionName, docSnap, isInitial) {
+  const data = docSnap.data()
+  const payments = Array.isArray(data.payments) ? data.payments : []
+  if (data.receiptCount === undefined && isInitial) {
+    if (payments.length) await docSnap.ref.update({ receiptCount: payments.length }).catch(() => {})
+    return
+  }
+  const done = Number(data.receiptCount) || 0
+  if (payments.length <= done) return
+  try {
+    await docSnap.ref.update({ receiptCount: payments.length }, { lastUpdateTime: docSnap.updateTime })
+  } catch {
+    return
+  }
+  const plan = subscriptionPlanText(subscriptionPlanId(data)).label
+  const issued = []
+  for (let i = done; i < payments.length; i++) {
+    const p = payments[i]
+    if (!(Number(p.amount) > 0)) continue
+    const months = Number(p.months) || 1
+    const r = await issueReceipt({
+      customerName: data.customerName, customerPhone: data.customerPhone,
+      description: `${plan}, ${months} month${months > 1 ? "s" : ""}`,
+      amount: Number(p.amount), method: p.method, reference: p.reference, paidOn: p.date,
+      source: { collection: collectionName, id: docSnap.id, payment: i },
+    })
+    issued.push([i, r])
+  }
+  if (!issued.length) return
+  // Note each receipt on its payment, for the dashboard's receipt links.
+  const fresh = (await docSnap.ref.get()).data()
+  const list = Array.isArray(fresh?.payments) ? [...fresh.payments] : []
+  for (const [i, r] of issued) if (list[i]) list[i] = { ...list[i], receiptNumber: r.number, receiptToken: r.token }
+  await docSnap.ref.update({ payments: list })
+}
+
+function renderReceiptPdf(receipt, res) {
+  const doc = new PDFDocument({ size: "A5", margin: 36, info: { Title: `WasteCore receipt ${receipt.number}` } })
+  res.setHeader("Content-Type", "application/pdf")
+  res.setHeader("Content-Disposition", `inline; filename="WasteCore-receipt-${receipt.number}.pdf"`)
+  doc.pipe(res)
+  const green = "#3a8f1f"
+  const ngn = (n) => `NGN ${Number(n).toLocaleString("en-NG")}`
+  const left = doc.page.margins.left
+  const width = doc.page.width - left - doc.page.margins.right
+
+  doc.fillColor(green).font("Helvetica-Bold").fontSize(22).text("WasteCore", left, 36)
+  doc.fillColor("#555").font("Helvetica").fontSize(9).text(`Waste collection \u00B7 ${SERVICE_AREA}`, left, 62)
+  doc.fillColor("#111").font("Helvetica-Bold").fontSize(14).text("RECEIPT", left, 40, { width, align: "right" })
+  doc.font("Helvetica").fontSize(9).fillColor("#555")
+    .text(`No. ${receipt.number}`, left, 58, { width, align: "right" })
+    .text(`Date: ${displayDate(receipt.paidOn)}`, left, 70, { width, align: "right" })
+
+  doc.moveTo(left, 92).lineTo(left + width, 92).strokeColor("#ddd").stroke()
+  doc.fillColor("#555").fontSize(8).text("BILLED TO", left, 104)
+  doc.fillColor("#111").font("Helvetica-Bold").fontSize(11).text(receipt.customerName || "Customer", left, 116)
+  doc.font("Helvetica").fontSize(9).fillColor("#333").text(receipt.customerPhone || "", left, 131)
+
+  let y = 160
+  doc.rect(left, y, width, 20).fill("#f2f7ef")
+  doc.fillColor("#333").font("Helvetica-Bold").fontSize(9)
+    .text("Description", left + 8, y + 6)
+    .text("Amount", left, y + 6, { width: width - 8, align: "right" })
+  y += 28
+  doc.font("Helvetica").fontSize(10).fillColor("#111")
+    .text(receipt.description, left + 8, y, { width: width - 110 })
+    .text(ngn(receipt.amount), left, y, { width: width - 8, align: "right" })
+  y = Math.max(doc.y, y + 14) + 10
+  doc.moveTo(left, y).lineTo(left + width, y).strokeColor("#ddd").stroke()
+  y += 10
+  doc.font("Helvetica-Bold").fontSize(12)
+    .text("Total paid", left + 8, y)
+    .text(ngn(receipt.amount), left, y, { width: width - 8, align: "right" })
+  y += 30
+  doc.font("Helvetica").fontSize(9).fillColor("#555")
+    .text(`Payment method: ${METHOD_NAMES[receipt.method] || receipt.method}`, left + 8, y)
+  if (receipt.reference) doc.text(`Reference: ${receipt.reference}`, left + 8, y + 13)
+
+  // "PAID" stamp
+  doc.save().rotate(-12, { origin: [left + width - 60, y + 6] })
+  doc.roundedRect(left + width - 105, y - 8, 90, 30, 4).lineWidth(2).strokeColor(green).stroke()
+  doc.fillColor(green).font("Helvetica-Bold").fontSize(16).text("PAID", left + width - 105, y, { width: 90, align: "center" })
+  doc.restore()
+
+  doc.font("Helvetica").fontSize(8).fillColor("#777")
+    .text(`Thank you for choosing WasteCore. Questions? WhatsApp +${businessNumber()}`, left, doc.page.height - 60, { width, align: "center" })
+  doc.end()
+}
+
 // ================= BROADCASTS =================
 // Announcements from the dashboard to a group of customers. Customers who
 // haven't messaged recently only get approved templates, so this uses a
@@ -1334,12 +1498,17 @@ async function sendSubscriptionConfirmation(data) {
 }
 
 function setupSubscriberWelcome() {
+  let initialLoad = true
   db.collection("subscribers").onSnapshot(
     (snapshot) => {
+      const isInitial = initialLoad
+      initialLoad = false
       snapshot.docChanges().forEach(async (change) => {
         if (change.type === "removed") return
         await sendRenewalReminderIfRequested("subscribers", change.doc)
           .catch((err) => console.error(`Renewal reminder failed for subscribers/${change.doc.id}:`, err))
+        await issueSubscriptionReceipts("subscribers", change.doc, isInitial)
+          .catch((err) => console.error(`Receipt failed for subscribers/${change.doc.id}:`, err))
         const data = change.doc.data()
         if (data.sendWhatsAppConfirmation !== true || data.whatsAppConfirmation || data.status !== "active") return
         try {
@@ -1452,7 +1621,7 @@ function aboutMedia() {
  * Sends a picture or video by public URL through Meta's Cloud API (same
  * token and number as the Pay button). Returns false if it couldn't be sent.
  */
-async function sendWhatsAppMedia(to, { type, url, caption, phoneNumberId }) {
+async function sendWhatsAppMedia(to, { type, url, caption, filename, phoneNumberId }) {
   const numberId = whatsAppNumberId(phoneNumberId)
   const token = process.env.WHATSAPP_ACCESS_TOKEN
   const phone = normalizePhone(to).replace(/\D/g, "")
@@ -1465,7 +1634,11 @@ async function sendWhatsAppMedia(to, { type, url, caption, phoneNumberId }) {
         recipient_type: "individual",
         to: phone,
         type,
-        [type]: { link: url, ...(caption ? { caption: caption.slice(0, 1024) } : {}) },
+        [type]: {
+          link: url,
+          ...(caption ? { caption: caption.slice(0, 1024) } : {}),
+          ...(type === "document" && filename ? { filename } : {}),
+        },
       },
       { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, timeout: 15000 }
     )
@@ -3736,6 +3909,20 @@ nextApp.prepare().then(() => {
         ? "Thank you! Your payment is confirmed and the details are on WhatsApp. You can close this page."
         : "If you completed the payment, you'll get a WhatsApp confirmation shortly. Otherwise go back to WhatsApp and type <b>hi</b> to try again.",
     }))
+  })
+
+  // PDF receipts: the link (sent to the customer and shown to admins) is
+  // the only way in; the token is random.
+  app.get("/receipts/:file", async (req, res) => {
+    const token = String(req.params.file).replace(/\.pdf$/i, "").slice(0, 64)
+    try {
+      const snap = await db.collection("receipts").doc(token).get()
+      if (!snap.exists) return res.status(404).type("html").send(brandedPage({ ok: false, title: "Receipt not found", body: "This receipt link isn't valid. Message us on WhatsApp for a copy." }))
+      renderReceiptPdf(snap.data(), res)
+    } catch (err) {
+      console.error("Receipt failed:", err)
+      res.status(500).send("Could not load the receipt. Please try again.")
+    }
   })
 
   // "Renew now" link from a renewal reminder: starts a fresh Paystack

@@ -317,7 +317,14 @@ export function CustomersManager({ searchQuery = "" }: { searchQuery?: string })
                     <ul className="space-y-1 text-sm">
                       {selected.payments.map((p, idx) => (
                         <li key={idx} className="flex justify-between gap-2 border-b py-1 last:border-b-0">
-                          <span>{prettyDate(p.date)} · {p.service} <span className="text-muted-foreground">({METHOD_LABELS[p.method] ?? p.method})</span></span>
+                          <span>
+                            {prettyDate(p.date)} · {p.service} <span className="text-muted-foreground">({METHOD_LABELS[p.method] ?? p.method})</span>
+                            {p.receiptUrl && (
+                              <a href={p.receiptUrl} target="_blank" rel="noopener noreferrer" className="ml-2 text-xs text-green-700 hover:underline">
+                                Receipt {p.receiptNumber}
+                              </a>
+                            )}
+                          </span>
                           <span className="font-medium">{naira(p.amount)}</span>
                         </li>
                       ))}

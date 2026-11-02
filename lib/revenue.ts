@@ -12,6 +12,9 @@ export interface RevenueEntry {
   customerPhone: string
   details: string
   reference: string
+  // PDF receipt, when one was issued (served by the bot server).
+  receiptUrl: string
+  receiptNumber: string
 }
 
 export interface RevenueData {
@@ -76,6 +79,8 @@ export async function loadRevenue(): Promise<RevenueData> {
         details: data.bagCount ? `${data.bagCount} bag${data.bagCount > 1 ? "s" : ""}`
           : data.bagSize ? `${data.bagSize} × ${data.quantity ?? 1}` : "",
         reference: data.paymentReference ?? "",
+        receiptUrl: data.receiptToken ? `/receipts/${data.receiptToken}.pdf` : "",
+        receiptNumber: data.receiptNumber && data.receiptNumber !== "issuing" ? data.receiptNumber : "",
       })
     }
   })
@@ -102,6 +107,8 @@ export async function loadRevenue(): Promise<RevenueData> {
           customerPhone: phoneOf(data),
           details: `${plan ? planFullLabel(plan) : planId}${p.months > 1 ? ` · ${p.months} months` : ""}`,
           reference: p.reference ?? "",
+          receiptUrl: p.receiptToken ? `/receipts/${p.receiptToken}.pdf` : "",
+          receiptNumber: p.receiptNumber ?? "",
         })
       }
     }
@@ -117,8 +124,8 @@ export function revenueCsv(entries: RevenueEntry[]): string {
     return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
   }
   const rows = [
-    ["Date", "Customer", "Phone", "Service", "Details", "Method", "Amount (NGN)", "Reference"],
-    ...entries.map((e) => [e.date, e.customerName, e.customerPhone, e.service, e.details, METHOD_LABELS[e.method] ?? e.method, e.amount, e.reference]),
+    ["Date", "Customer", "Phone", "Service", "Details", "Method", "Amount (NGN)", "Reference", "Receipt"],
+    ...entries.map((e) => [e.date, e.customerName, e.customerPhone, e.service, e.details, METHOD_LABELS[e.method] ?? e.method, e.amount, e.reference, e.receiptNumber]),
   ]
   return rows.map((r) => r.map(cell).join(",")).join("\n")
 }

@@ -190,6 +190,7 @@ export function RevenueReports() {
                 <TableHead>Service</TableHead>
                 <TableHead>Method</TableHead>
                 <TableHead className="text-right">Amount</TableHead>
+                <TableHead>Receipt</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -206,6 +207,13 @@ export function RevenueReports() {
                   </TableCell>
                   <TableCell><Badge variant="outline">{METHOD_LABELS[e.method] ?? e.method}</Badge></TableCell>
                   <TableCell className="text-right font-medium">{naira(e.amount)}</TableCell>
+                  <TableCell>
+                    {e.receiptUrl ? (
+                      <a href={e.receiptUrl} target="_blank" rel="noopener noreferrer" className="text-xs text-green-700 hover:underline">
+                        {e.receiptNumber || "PDF"}
+                      </a>
+                    ) : <span className="text-xs text-muted-foreground">—</span>}
+                  </TableCell>
                 </TableRow>
               ))}
             </TableBody>
