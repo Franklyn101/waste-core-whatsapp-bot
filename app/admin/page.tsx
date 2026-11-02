@@ -20,6 +20,7 @@ import { SubAdminsManager } from "@/components/sub-admins-manager"
 import { SubscriptionsManager } from "@/components/subscriptions-manager"
 import { AdminGate } from "@/components/admin-login"
 import { AdminAuthProvider, useAdminAuth } from "@/lib/admin-auth"
+import { Toaster } from "@/components/ui/sonner"
 
 
 export default function AdminPage() {
@@ -231,6 +232,25 @@ function DashboardPage() {
     mainRef.current?.scrollTo({ top: 0 })
   }
 
+  // Tapping a push notification opens /admin?section=..., or (if the
+  // dashboard is already open) the service worker asks it to switch page.
+  useEffect(() => {
+    const section = new URLSearchParams(window.location.search).get("section")
+    if (section) {
+      setActiveSection(section)
+      window.history.replaceState(null, "", window.location.pathname)
+    }
+    if (!("serviceWorker" in navigator)) return
+    const onMessage = (event: MessageEvent) => {
+      if (event.data?.type === "open-section" && typeof event.data.section === "string") {
+        setActiveSection(event.data.section)
+        setMobileNavOpen(false)
+      }
+    }
+    navigator.serviceWorker.addEventListener("message", onMessage)
+    return () => navigator.serviceWorker.removeEventListener("message", onMessage)
+  }, [])
+
   return (
     <div className="flex h-dvh bg-background">
       {/* Sidebar (fixed on desktop, drawer on phones) */}
@@ -249,11 +269,13 @@ function DashboardPage() {
           searchQuery={searchQuery}
           onSearchChange={setSearchQuery}
           onMenuClick={() => setMobileNavOpen(true)}
+          onNavigate={changeSection}
         />
 
         {/* Main Content Area */}
         <main ref={mainRef} className="flex-1 overflow-y-auto p-4 md:p-6">{renderMainContent()}</main>
       </div>
+      <Toaster position="top-right" closeButton />
     </div>
   )
 }
