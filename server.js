@@ -8,6 +8,7 @@ const { v2: cloudinary } = require("cloudinary")
 const axios = require("axios")
 const crypto = require("crypto")
 const webpush = require("web-push")
+const PDFDocument = require("pdfkit")
 
 // ================= NEXT.JS =================
 const dev = process.env.NODE_ENV !== "production"
@@ -122,14 +123,37 @@ const PICKUP_PRICE_PER_BAG = {
 }
 const MAX_BAGS_PER_PICKUP = 50
 
-const SERVICE_MENU =
-  `Choose service:\n` +
-  `1 - Instant Pickup\n` +
-  `2 - Schedule a Pickup\n` +
-  `3 - Monthly Subscription\n` +
-  `4 - Order Waste Bags\n` +
-  `5 - Speak to Support\n` +
-  `6 - About WasteCore & our services`
+// Menu options. Each id is the number customers can also type, so tapping
+// a WhatsApp list/button and replying "2" lead to the same place.
+const SERVICE_OPTIONS = [
+  { id: "1", title: "Instant Pickup", description: "We come as soon as possible" },
+  { id: "2", title: "Schedule a Pickup", description: "You choose the date and time" },
+  { id: "3", title: "Monthly Subscription", description: "Regular weekly pickups" },
+  { id: "4", title: "Order Waste Bags", description: "Packs of 10, delivered to you" },
+  { id: "5", title: "Speak to Support", description: "Talk to our team" },
+  { id: "6", title: "About WasteCore", description: "Our services, photos and video" },
+  { id: "7", title: "My Bookings", description: "Status, change date, cancel, renew" },
+]
+const numberedOptions = (options) => options.map((o) => `${o.id} - ${o.title}`).join("\n")
+const SERVICE_MENU = `Choose service:\n${numberedOptions(SERVICE_OPTIONS)}`
+
+const BAG_SIZE_OPTIONS = [
+  { id: "1", title: "Small", description: "NGN 500 \u00B7 pack of 10" },
+  { id: "2", title: "Medium", description: "NGN 900 \u00B7 pack of 10" },
+  { id: "3", title: "Large", description: "NGN 1,500 \u00B7 pack of 10" },
+]
+const SUPPORT_OPTIONS = [
+  { id: "1", title: "Missed Pickup" },
+  { id: "2", title: "Billing Issue" },
+  { id: "3", title: "Driver Complaint" },
+  { id: "4", title: "Change Pickup Date" },
+  { id: "5", title: "Other" },
+]
+const TIME_WINDOW_OPTIONS = [
+  { id: "1", title: "Morning 8am-12pm" },
+  { id: "2", title: "Afternoon 12pm-4pm" },
+  { id: "3", title: "Evening 4pm-7pm" },
+]
 
 // Monthly subscription plans, by category. Plan ids are "<category>_<pickups per week>".
 const MONTHLY_PLANS = {
@@ -372,6 +396,10 @@ function setupStatusListeners() {
           if (change.type !== "removed" && collectionName === "upgradeRequests") {
             await setPaidUntilOnceVerified(change.doc)
             await sendRenewalReminderIfRequested("upgradeRequests", change.doc)
+            await issueSubscriptionReceipts("upgradeRequests", change.doc, isInitial)
+          }
+          if (change.type !== "removed" && RECEIPT_BOOKING_COLLECTIONS.includes(collectionName)) {
+            await issueBookingReceipt(collectionName, change.doc)
           }
 
           // Record the current status on existing/new docs without notifying,
@@ -419,6 +447,7 @@ function setupStatusListeners() {
                 [date || "today"],
                 `\u2705 *Pickup completed*\n\nYour pickup${date ? ` on ${date}` : ""} has been completed. Thank you for choosing WasteCore! \u267B\uFE0F`
               )
+              if (COLLECTOR_COLLECTIONS.includes(collectionName)) await askForRating(collectionName, change.doc.id, data)
               // Subscription visits are covered by the monthly plan: no invoice.
               if (collectionName === "subscriptionVisits") return
               const verified = paymentVerified(data)
@@ -540,6 +569,13 @@ async function sendRenewalReminderIfRequested(collectionName, docSnap) {
     .catch((err) => console.error("Could not record renewal reminder status:", err))
 }
 
+// Short random token in the link; the subscription is looked up from it.
+async function createRenewalLink(collectionName, id, phone) {
+  const token = crypto.randomBytes(9).toString("base64url")
+  await db.collection("renewals").doc(token).set({ collection: collectionName, id, customerPhone: phone, createdAt: new Date().toISOString() })
+  return { token, url: `${PUBLIC_BASE_URL}/renew/${token}` }
+}
+
 async function sendRenewalReminder(collectionName, id, data) {
   const phone = toWhatsAppId(data.customerPhone)
   if (!phone) return "invalid_phone"
@@ -550,10 +586,7 @@ async function sendRenewalReminder(collectionName, id, data) {
     console.error("PUBLIC_BASE_URL is not set, so renewal links can't be made.")
     return "failed"
   }
-  // Short random token in the link; the subscription is looked up from it.
-  const token = crypto.randomBytes(9).toString("base64url")
-  await db.collection("renewals").doc(token).set({ collection: collectionName, id, customerPhone: phone, createdAt: new Date().toISOString() })
-  const url = `${PUBLIC_BASE_URL}/renew/${token}`
+  const { token, url } = await createRenewalLink(collectionName, id, phone)
   const name = String(data.customerName || "").trim() || "there"
   const plan = subscriptionPlanText(planId).label
   const when = renewalWhen(data.paidUntil)
@@ -617,7 +650,12 @@ const OPEN_JOB_STATUSES = ["pending", "assigned", "confirmed"]
 const SERVICE_AREA = process.env.SERVICE_AREA || "Yenagoa"
 
 // Directions link; the town is added when the address doesn't name it.
-function mapsLink(address) {
+// Directions: the customer's location pin when they shared one, otherwise a
+// search for the typed address.
+function mapsLink(address, location) {
+  if (Number.isFinite(location?.lat) && Number.isFinite(location?.lng)) {
+    return `https://www.google.com/maps/search/?api=1&query=${location.lat},${location.lng}`
+  }
   const a = String(address || "").trim()
   if (!a) return ""
   const query = a.toLowerCase().includes(SERVICE_AREA.toLowerCase()) ? a : `${a}, ${SERVICE_AREA}`
@@ -674,7 +712,7 @@ async function notifyCollectorIfAssigned(collectionName, docSnap) {
   let status = "failed"
   if (phone) {
     const when = `${shortDay(job.pickupDate)}${job.timeWindow ? `, ${job.timeWindow}` : ""}`
-    const link = mapsLink(job.address)
+    const link = mapsLink(job.address, job.location)
     status = await notifyCustomer(
       phone,
       TEMPLATE_COLLECTOR_PICKUP,
@@ -685,7 +723,7 @@ async function notifyCollectorIfAssigned(collectionName, docSnap) {
         `\u{1F4C5} ${when}`,
         `\u{1F464} ${jobCustomer(job)}`,
         `\u{1F4CD} ${job.address || "No address"}`,
-        ...(link ? [`\u{1F5FA} ${link}`] : []),
+        ...(link ? [`${job.location ? "\u{1F4CC} Pin" : "\u{1F5FA} Map"}: ${link}`] : []),
         `\u{1F6CD} ${jobWhat(job)}`,
         "",
         "Reply *JOBS* to see all your pickups.",
@@ -741,13 +779,13 @@ async function collectorJobsMessage(collector) {
     lines.push("", `*${label ? `${label}, ` : ""}${shortDay(date)}*`)
     for (const j of day) {
       number++
-      const link = mapsLink(j.address)
+      const link = mapsLink(j.address, j.location)
       const report = j.collectorReport?.status === "done" ? "\u2705 Reported done, waiting for admin"
         : j.collectorReport?.status === "failed" ? "\u274C Reported not picked up" : null
       lines.push(
         `*${number}.* ${jobCustomer(j)}`,
         `   \u{1F4CD} ${j.address || "No address"}`,
-        ...(link ? [`   \u{1F5FA} ${link}`] : []),
+        ...(link ? [`   ${j.location ? "\u{1F4CC} Pin" : "\u{1F5FA} Map"}: ${link}`] : []),
         `   \u{1F6CD} ${jobWhat(j)}${j.timeWindow ? ` \u00B7 ${j.timeWindow}` : ""}`,
         ...(report ? [`   ${report}`] : [])
       )
@@ -821,6 +859,8 @@ function setupCollectorSummaries() {
   const run = () => {
     sendCollectorSummaries().catch((err) => console.error("Collector summary failed:", err))
     sendAdminDigest().catch((err) => console.error("Admin digest failed:", err))
+    sendAutomaticRenewalReminders().catch((err) => console.error("Automatic renewal reminders failed:", err))
+    sendPickupReminders().catch((err) => console.error("Pickup reminders failed:", err))
   }
   run()
   setInterval(run, 10 * 60 * 1000).unref()
@@ -916,6 +956,12 @@ function newActivityAlert(collectionName, id, data) {
   const paid = data.paymentMethod === "paystack" ? ` · ${naira(data.totalAmount ?? 0)} paid (Paystack)`
     : data.paymentReceiptUrl ? " · receipt sent, verify payment" : ""
   const key = `new_${collectionName}_${id}`
+  const area = data.outsideArea ? " \u26A0\uFE0F outside service area" : ""
+  const alert = newActivityAlertFor(collectionName, data, name, paid, key)
+  return alert && { ...alert, body: `${alert.body}${area}` }
+}
+
+function newActivityAlertFor(collectionName, data, name, paid, key) {
   switch (collectionName) {
     case "instantPickups":
       return { key, type: "booking", section: "instant-pickups", title: "New instant pickup",
@@ -972,6 +1018,404 @@ async function sendAdminDigest() {
     section: "subscriptions",
     title: "Subscriptions to renew",
     body: [expired && `${expired} expired`, expiring && `${expiring} expiring this week`].filter(Boolean).join(", ") + ". Send renewal reminders from Subscriptions.",
+  })
+}
+
+// ================= RECEIPTS =================
+// Every confirmed payment gets a numbered PDF receipt (WC-000001...),
+// stored in receipts/{token} and served at /receipts/<token>.pdf. The
+// customer is sent the PDF on WhatsApp (it arrives if they messaged within
+// 24 hours; otherwise a link is sent as text, and admins can open it from
+// the dashboard).
+const RECEIPT_BOOKING_COLLECTIONS = ["instantPickups", "pickupRequests", "wasteBagOrders"]
+const RECEIPT_SERVICE_LABELS = {
+  instantPickups: "Instant pickup",
+  pickupRequests: "Scheduled pickup",
+  wasteBagOrders: "Waste bags",
+}
+const METHOD_NAMES = { paystack: "Paystack", bank_transfer: "Bank transfer", cash: "Cash", pos: "POS", other: "Other" }
+
+async function nextReceiptNumber() {
+  const ref = db.collection("config").doc("receiptCounter")
+  const n = await db.runTransaction(async (t) => {
+    const snap = await t.get(ref)
+    const next = (snap.exists ? Number(snap.data().next) || 1 : 1)
+    t.set(ref, { next: next + 1 }, { merge: true })
+    return next
+  })
+  return `WC-${String(n).padStart(6, "0")}`
+}
+
+async function issueReceipt({ customerName, customerPhone, description, amount, method, reference, paidOn, source }) {
+  const token = crypto.randomBytes(12).toString("base64url")
+  const number = await nextReceiptNumber()
+  await db.collection("receipts").doc(token).set({
+    number, customerName: customerName || "", customerPhone: normalizePhone(customerPhone || ""),
+    description, amount, method: method || "other", reference: reference || "", paidOn: paidOn || lagosToday(),
+    source, createdAt: new Date().toISOString(),
+  })
+  const phone = toWhatsAppId(customerPhone)
+  if (phone && PUBLIC_BASE_URL) {
+    const url = `${PUBLIC_BASE_URL}/receipts/${token}.pdf`
+    const caption = `\u{1F9FE} Receipt ${number} \u00B7 ${naira(amount)} \u00B7 ${description}. Thank you for choosing WasteCore!`
+    const sent = await sendWhatsAppMedia(phone, { type: "document", url, filename: `WasteCore-receipt-${number}.pdf`, caption })
+    if (!sent) await sendWhatsAppMessage(phone, `${caption}\n\nDownload: ${url}`)
+  }
+  return { token, number }
+}
+
+// Paid pickups and bag orders (Paystack, or a bank transfer once verified).
+// Only payments from the last 2 days, so a restart never re-sends old ones.
+async function issueBookingReceipt(collectionName, docSnap) {
+  const data = docSnap.data()
+  if (data.receiptNumber || !paymentVerified(data) || data.status === "cancelled") return
+  const paidAt = data.paidAt || data.receiptVerifiedAt
+  if (!paidAt || Date.now() - Date.parse(paidAt) > 2 * 86400000) return
+  const amount = Number(data.totalAmount) || 0
+  if (!amount) return
+  try {
+    await docSnap.ref.update({ receiptNumber: "issuing" }, { lastUpdateTime: docSnap.updateTime })
+  } catch {
+    return // changed meanwhile; the next snapshot handles it
+  }
+  const what = data.bagCount ? ` (${bagsText(data.bagCount)})` : data.bagSize ? ` (${data.bagSize} \u00D7 ${data.quantity ?? 1})` : ""
+  const { token, number } = await issueReceipt({
+    customerName: data.customerName, customerPhone: data.customerPhone,
+    description: `${RECEIPT_SERVICE_LABELS[collectionName]}${what}${data.pickupDate ? `, ${displayDate(data.pickupDate)}` : ""}`,
+    amount, method: data.paymentMethod, reference: data.paymentReference, paidOn: String(paidAt).slice(0, 10),
+    source: { collection: collectionName, id: docSnap.id },
+  })
+  await docSnap.ref.update({ receiptNumber: number, receiptToken: token })
+}
+
+// Subscription payments (first month, renewals, payments recorded on the
+// dashboard) are in payments[]; receiptCount says how many have receipts.
+// Payments already there when the server starts are not re-sent.
+async function issueSubscriptionReceipts(collectionName, docSnap, isInitial) {
+  const data = docSnap.data()
+  const payments = Array.isArray(data.payments) ? data.payments : []
+  if (data.receiptCount === undefined && isInitial) {
+    if (payments.length) await docSnap.ref.update({ receiptCount: payments.length }).catch(() => {})
+    return
+  }
+  const done = Number(data.receiptCount) || 0
+  if (payments.length <= done) return
+  try {
+    await docSnap.ref.update({ receiptCount: payments.length }, { lastUpdateTime: docSnap.updateTime })
+  } catch {
+    return
+  }
+  const plan = subscriptionPlanText(subscriptionPlanId(data)).label
+  const issued = []
+  for (let i = done; i < payments.length; i++) {
+    const p = payments[i]
+    if (!(Number(p.amount) > 0)) continue
+    const months = Number(p.months) || 1
+    const r = await issueReceipt({
+      customerName: data.customerName, customerPhone: data.customerPhone,
+      description: `${plan}, ${months} month${months > 1 ? "s" : ""}`,
+      amount: Number(p.amount), method: p.method, reference: p.reference, paidOn: p.date,
+      source: { collection: collectionName, id: docSnap.id, payment: i },
+    })
+    issued.push([i, r])
+  }
+  if (!issued.length) return
+  // Note each receipt on its payment, for the dashboard's receipt links.
+  const fresh = (await docSnap.ref.get()).data()
+  const list = Array.isArray(fresh?.payments) ? [...fresh.payments] : []
+  for (const [i, r] of issued) if (list[i]) list[i] = { ...list[i], receiptNumber: r.number, receiptToken: r.token }
+  await docSnap.ref.update({ payments: list })
+}
+
+function renderReceiptPdf(receipt, res) {
+  const doc = new PDFDocument({ size: "A5", margin: 36, info: { Title: `WasteCore receipt ${receipt.number}` } })
+  res.setHeader("Content-Type", "application/pdf")
+  res.setHeader("Content-Disposition", `inline; filename="WasteCore-receipt-${receipt.number}.pdf"`)
+  doc.pipe(res)
+  const green = "#3a8f1f"
+  const ngn = (n) => `NGN ${Number(n).toLocaleString("en-NG")}`
+  const left = doc.page.margins.left
+  const width = doc.page.width - left - doc.page.margins.right
+
+  doc.fillColor(green).font("Helvetica-Bold").fontSize(22).text("WasteCore", left, 36)
+  doc.fillColor("#555").font("Helvetica").fontSize(9).text(`Waste collection \u00B7 ${SERVICE_AREA}`, left, 62)
+  doc.fillColor("#111").font("Helvetica-Bold").fontSize(14).text("RECEIPT", left, 40, { width, align: "right" })
+  doc.font("Helvetica").fontSize(9).fillColor("#555")
+    .text(`No. ${receipt.number}`, left, 58, { width, align: "right" })
+    .text(`Date: ${displayDate(receipt.paidOn)}`, left, 70, { width, align: "right" })
+
+  doc.moveTo(left, 92).lineTo(left + width, 92).strokeColor("#ddd").stroke()
+  doc.fillColor("#555").fontSize(8).text("BILLED TO", left, 104)
+  doc.fillColor("#111").font("Helvetica-Bold").fontSize(11).text(receipt.customerName || "Customer", left, 116)
+  doc.font("Helvetica").fontSize(9).fillColor("#333").text(receipt.customerPhone || "", left, 131)
+
+  let y = 160
+  doc.rect(left, y, width, 20).fill("#f2f7ef")
+  doc.fillColor("#333").font("Helvetica-Bold").fontSize(9)
+    .text("Description", left + 8, y + 6)
+    .text("Amount", left, y + 6, { width: width - 8, align: "right" })
+  y += 28
+  doc.font("Helvetica").fontSize(10).fillColor("#111")
+    .text(receipt.description, left + 8, y, { width: width - 110 })
+    .text(ngn(receipt.amount), left, y, { width: width - 8, align: "right" })
+  y = Math.max(doc.y, y + 14) + 10
+  doc.moveTo(left, y).lineTo(left + width, y).strokeColor("#ddd").stroke()
+  y += 10
+  doc.font("Helvetica-Bold").fontSize(12)
+    .text("Total paid", left + 8, y)
+    .text(ngn(receipt.amount), left, y, { width: width - 8, align: "right" })
+  y += 30
+  doc.font("Helvetica").fontSize(9).fillColor("#555")
+    .text(`Payment method: ${METHOD_NAMES[receipt.method] || receipt.method}`, left + 8, y)
+  if (receipt.reference) doc.text(`Reference: ${receipt.reference}`, left + 8, y + 13)
+
+  // "PAID" stamp
+  doc.save().rotate(-12, { origin: [left + width - 60, y + 6] })
+  doc.roundedRect(left + width - 105, y - 8, 90, 30, 4).lineWidth(2).strokeColor(green).stroke()
+  doc.fillColor(green).font("Helvetica-Bold").fontSize(16).text("PAID", left + width - 105, y, { width: 90, align: "center" })
+  doc.restore()
+
+  doc.font("Helvetica").fontSize(8).fillColor("#777")
+    .text(`Thank you for choosing WasteCore. Questions? WhatsApp +${businessNumber()}`, left, doc.page.height - 60, { width, align: "center" })
+  doc.end()
+}
+
+// ================= BROADCASTS =================
+// Announcements from the dashboard to a group of customers. Customers who
+// haven't messaged recently only get approved templates, so this uses a
+// Marketing template (WAPI_TEMPLATE_ANNOUNCEMENT):
+//   name: "announcement"   category: Marketing
+//   body: "Hello {{1}}, {{2}}
+//
+//          Reply UNSUBSCRIBE to stop these updates."
+// Customers who reply UNSUBSCRIBE are skipped (customers/{id}.broadcastOptOut).
+const TEMPLATE_ANNOUNCEMENT = process.env.WAPI_TEMPLATE_ANNOUNCEMENT || "announcement"
+const BROADCAST_AUDIENCES = ["all", "subscribers", "business", "household", "recent"]
+
+// phone (whatsapp:+234...) -> name, for an audience.
+async function broadcastRecipients(audience) {
+  const recipients = new Map()
+  const add = (phone, name) => {
+    const id = toWhatsAppId(phone)
+    if (id && !recipients.has(id)) recipients.set(id, String(name || "").trim())
+    else if (id && name && !recipients.get(id)) recipients.set(id, String(name).trim())
+  }
+  const subs = await activeSubscriptions()
+  if (audience === "subscribers" || audience === "business" || audience === "household") {
+    for (const s of subs) {
+      const category = subscriptionPlanId(s.data).split("_")[0]
+      if (audience !== "subscribers" && category !== audience) continue
+      add(s.data.customerPhone, s.data.customerName)
+    }
+  } else {
+    const cutoff = new Date(Date.now() - 60 * 86400000).toISOString()
+    const cols = ["instantPickups", "pickupRequests", "upgradeRequests", "wasteBagOrders"]
+    const snaps = await Promise.all(cols.map((c) => db.collection(c).get()))
+    for (const snap of snaps) {
+      for (const d of snap.docs) {
+        const data = d.data()
+        if (audience === "recent" && String(data.createdAt || "") < cutoff) continue
+        add(data.customerPhone, data.customerName)
+      }
+    }
+    if (audience === "all") {
+      for (const s of subs) add(s.data.customerPhone, s.data.customerName)
+      const customers = await db.collection("customers").get()
+      for (const d of customers.docs) add(d.data().phone || d.id, d.data().name || d.data().businessName)
+    }
+  }
+  // Skip customers who unsubscribed.
+  const optedOut = await db.collection("customers").where("broadcastOptOut", "==", true).get()
+  for (const d of optedOut.docs) recipients.delete(toWhatsAppId(d.data().phone || d.id))
+  return recipients
+}
+
+// Sends in the background, about 3 per second, updating broadcasts/{id}.
+async function runBroadcast(ref, recipients, message) {
+  let sent = 0
+  let failed = 0
+  let i = 0
+  for (const [phone, name] of recipients) {
+    const status = await notifyCustomer(
+      phone,
+      TEMPLATE_ANNOUNCEMENT,
+      [displayName(name) || "there", message],
+      `\u{1F4E2} *WasteCore update*\n\nHello ${displayName(name) || "there"}, ${message}\n\n_Reply UNSUBSCRIBE to stop these updates._`
+    ).catch(() => "failed")
+    if (status === "failed") failed++
+    else sent++
+    if (++i % 10 === 0) await ref.update({ sent, failed }).catch(() => {})
+    await new Promise((r) => setTimeout(r, 300))
+  }
+  await ref.update({ sent, failed, status: "done", finishedAt: new Date().toISOString() })
+}
+
+// ================= RATINGS =================
+// After a pickup is completed the customer is asked for 1-5 stars (a
+// tappable list; it reaches them if they messaged within 24 hours). Their
+// answer is accepted for RATING_DAYS, also typed as a single digit. Low
+// ratings ask what went wrong and alert the admins.
+const RATING_DAYS = 3
+const RATING_OPTIONS = [
+  { id: "rate_5", title: "\u2B50\u2B50\u2B50\u2B50\u2B50 Excellent" },
+  { id: "rate_4", title: "\u2B50\u2B50\u2B50\u2B50 Good" },
+  { id: "rate_3", title: "\u2B50\u2B50\u2B50 Okay" },
+  { id: "rate_2", title: "\u2B50\u2B50 Poor" },
+  { id: "rate_1", title: "\u2B50 Very poor" },
+]
+
+async function askForRating(collectionName, id, job) {
+  const phone = toWhatsAppId(job.customerPhone)
+  if (!phone || job.rating) return
+  await saveCustomer(phone, {
+    pendingRating: { collection: collectionName, id, until: new Date(Date.now() + RATING_DAYS * 86400000).toISOString() },
+  })
+  const body = "\u{1F64F} *How was your pickup?*\n\nYour rating helps us improve. Tap below, or reply with a number from 1 (very poor) to 5 (excellent)."
+  const sent = await sendWhatsAppChoices(phone, { body, options: RATING_OPTIONS, button: "Rate pickup" })
+  if (!sent) await sendWhatsAppMessage(phone, body)
+}
+
+// Service area: a shared pin further than SERVICE_RADIUS_KM from the
+// centre of SERVICE_AREA is flagged (the customer can still book).
+const SERVICE_CENTER = String(process.env.SERVICE_CENTER || "4.9267,6.2676").split(",").map(Number) // Yenagoa
+const SERVICE_RADIUS_KM = Number(process.env.SERVICE_RADIUS_KM || 30)
+// Instant pickups booked after this hour (Nigerian time) are collected the next day.
+const INSTANT_CUTOFF_HOUR = Number(process.env.INSTANT_CUTOFF_HOUR || 16)
+
+function distanceKm(a, b) {
+  const rad = (d) => (d * Math.PI) / 180
+  const dLat = rad(b.lat - a.lat)
+  const dLng = rad(b.lng - a.lng)
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLng / 2) ** 2
+  return 2 * 6371 * Math.asin(Math.sqrt(h))
+}
+
+function outsideServiceArea(location) {
+  if (!Number.isFinite(location?.lat) || SERVICE_CENTER.some((n) => !Number.isFinite(n))) return false
+  return distanceKm({ lat: SERVICE_CENTER[0], lng: SERVICE_CENTER[1] }, location) > SERVICE_RADIUS_KM
+}
+
+const instantCutoffPassed = () => lagosHour() >= INSTANT_CUTOFF_HOUR
+const cutoffLabel = () => {
+  const h = INSTANT_CUTOFF_HOUR
+  return `${h % 12 || 12}${h < 12 ? "am" : "pm"}`
+}
+
+// ================= AUTOMATIC REMINDERS =================
+// Customers with a pickup tomorrow get a reminder in the evening, and
+// subscriptions get a renewal reminder a few days before they expire.
+// Customers may not have messaged recently, so the pickup reminder needs an
+// approved template (WAPI_TEMPLATE_PICKUP_REMINDER), category Utility:
+//   name: "pickup_reminder"
+//   body: "Hello {{1}}, a reminder that your WasteCore pickup is tomorrow,
+//          {{2}}, at {{3}}. Please have your waste bagged and ready.
+//          Reply HI if you need to make a change."
+const TEMPLATE_PICKUP_REMINDER = process.env.WAPI_TEMPLATE_PICKUP_REMINDER || "pickup_reminder"
+const PICKUP_REMINDER_HOUR = Number(process.env.PICKUP_REMINDER_HOUR || 17) // Nigerian time
+// Automatic renewal reminder this many days before paidUntil (0 turns it off).
+const AUTO_RENEWAL_DAYS_BEFORE = Number(process.env.AUTO_RENEWAL_DAYS_BEFORE ?? 3)
+const WEEKDAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+
+const lagosHour = (now = new Date()) =>
+  Number(new Intl.DateTimeFormat("en-GB", { timeZone: "Africa/Lagos", hour: "numeric", hourCycle: "h23" }).format(now))
+
+// Runs `task` at most once per day, after `fromHour` and before `toHour`.
+async function oncePerDay(markerId, fromHour, toHour, task) {
+  const hour = lagosHour()
+  if (hour < fromHour || hour >= toHour) return
+  const today = lagosToday()
+  const markerRef = db.collection("config").doc(markerId)
+  const claimed = await db.runTransaction(async (t) => {
+    const snap = await t.get(markerRef)
+    if (snap.exists && snap.data().lastDate === today) return false
+    t.set(markerRef, { lastDate: today, ranAt: new Date().toISOString() }, { merge: true })
+    return true
+  })
+  if (claimed) await task(today)
+}
+
+// Active subscriptions: dashboard subscribers plus WhatsApp plans not yet
+// managed as subscribers. Returns [{ collection, id, data }].
+async function activeSubscriptions() {
+  const [subscribers, requests] = await Promise.all([
+    db.collection("subscribers").get(),
+    db.collection("upgradeRequests").get(),
+  ])
+  const linked = new Set(subscribers.docs.map((d) => d.data().linkedRequestId).filter(Boolean))
+  return [
+    ...subscribers.docs.filter((d) => d.data().status === "active").map((d) => ({ collection: "subscribers", id: d.id, ref: d.ref, data: d.data() })),
+    ...requests.docs.filter((d) => !linked.has(d.id) && d.data().status !== "cancelled")
+      .map((d) => ({ collection: "upgradeRequests", id: d.id, ref: d.ref, data: d.data() })),
+  ]
+}
+
+async function sendAutomaticRenewalReminders() {
+  if (!(AUTO_RENEWAL_DAYS_BEFORE > 0)) return
+  await oncePerDay("autoRenewalReminders", COLLECTOR_SUMMARY_HOUR, 12, async (today) => {
+    let count = 0
+    for (const sub of await activeSubscriptions()) {
+      const paidUntil = sub.data.paidUntil
+      if (!paidUntil || !monthlyPrice(subscriptionPlanId(sub.data))) continue
+      const daysLeft = Math.round((Date.parse(`${paidUntil}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86400000)
+      // Within the window (also catches a day missed while the server was
+      // down), once per paid period; renewing moves paidUntil and re-arms it.
+      if (daysLeft < 0 || daysLeft > AUTO_RENEWAL_DAYS_BEFORE) continue
+      if (sub.data.autoRenewalReminderFor === paidUntil) continue
+      await sub.ref.update({ autoRenewalReminderFor: paidUntil, renewalReminderRequestedAt: new Date().toISOString() })
+      count++
+    }
+    if (count) console.log(`Automatic renewal reminders requested for ${count} subscription(s)`)
+  })
+}
+
+async function sendPickupReminders() {
+  await oncePerDay("pickupReminders", PICKUP_REMINDER_HOUR, 21, async (today) => {
+    const tomorrow = addDays(today, 1)
+    const weekday = WEEKDAY_NAMES[new Date(`${tomorrow}T00:00:00Z`).getUTCDay()]
+    // phone -> { name, when, address }; one reminder per customer.
+    const due = new Map()
+    const add = (phone, name, timeWindow, address) => {
+      const id = toWhatsAppId(phone)
+      if (!id || due.has(id)) return
+      due.set(id, { name, when: `${shortDay(tomorrow)}${timeWindow ? `, ${timeWindow}` : ""}`, address })
+    }
+
+    const [scheduled, instant] = await Promise.all([
+      db.collection("pickupRequests").where("pickupDate", "==", tomorrow).get(),
+      db.collection("instantPickups").where("pickupDate", "==", tomorrow).get(),
+    ])
+    for (const d of [...scheduled.docs, ...instant.docs]) {
+      const job = d.data()
+      if (OPEN_JOB_STATUSES.includes(job.status)) add(job.customerPhone, job.customerName, job.timeWindow, job.address)
+    }
+    for (const sub of await activeSubscriptions()) {
+      const s = sub.data
+      if (sub.collection !== "subscribers") continue // WhatsApp plans have no pickup days until scheduled
+      if (!Array.isArray(s.pickupDays) || !s.pickupDays.includes(weekday)) continue
+      if (s.startDate && s.startDate > tomorrow) continue
+      if (s.paidUntil && s.paidUntil < tomorrow) continue // expired: the renewal reminder covers it
+      add(s.customerPhone, s.customerName, SUBSCRIPTION_TIME_WINDOWS[s.timeWindow], s.address)
+    }
+
+    let sent = 0
+    for (const [phone, r] of due) {
+      const name = String(r.name || "").trim() || "there"
+      const status = await notifyCustomer(
+        phone,
+        TEMPLATE_PICKUP_REMINDER,
+        [name, r.when, r.address || "your address"],
+        [
+          `\u23F0 *Pickup reminder*`,
+          "",
+          `Hello ${name}, your WasteCore pickup is *tomorrow, ${r.when}*.`,
+          ...(r.address ? [`\u{1F4CD} ${r.address}`] : []),
+          "",
+          "Please have your waste bagged and ready. Reply *hi* if you need to make a change.",
+        ].join("\n")
+      )
+      if (status !== "failed") sent++
+    }
+    console.log(`Pickup reminders sent to ${sent} of ${due.size} customer(s) for ${tomorrow}`)
   })
 }
 
@@ -1054,12 +1498,17 @@ async function sendSubscriptionConfirmation(data) {
 }
 
 function setupSubscriberWelcome() {
+  let initialLoad = true
   db.collection("subscribers").onSnapshot(
     (snapshot) => {
+      const isInitial = initialLoad
+      initialLoad = false
       snapshot.docChanges().forEach(async (change) => {
         if (change.type === "removed") return
         await sendRenewalReminderIfRequested("subscribers", change.doc)
           .catch((err) => console.error(`Renewal reminder failed for subscribers/${change.doc.id}:`, err))
+        await issueSubscriptionReceipts("subscribers", change.doc, isInitial)
+          .catch((err) => console.error(`Receipt failed for subscribers/${change.doc.id}:`, err))
         const data = change.doc.data()
         if (data.sendWhatsAppConfirmation !== true || data.whatsAppConfirmation || data.status !== "active") return
         try {
@@ -1172,7 +1621,7 @@ function aboutMedia() {
  * Sends a picture or video by public URL through Meta's Cloud API (same
  * token and number as the Pay button). Returns false if it couldn't be sent.
  */
-async function sendWhatsAppMedia(to, { type, url, caption, phoneNumberId }) {
+async function sendWhatsAppMedia(to, { type, url, caption, filename, phoneNumberId }) {
   const numberId = whatsAppNumberId(phoneNumberId)
   const token = process.env.WHATSAPP_ACCESS_TOKEN
   const phone = normalizePhone(to).replace(/\D/g, "")
@@ -1185,7 +1634,11 @@ async function sendWhatsAppMedia(to, { type, url, caption, phoneNumberId }) {
         recipient_type: "individual",
         to: phone,
         type,
-        [type]: { link: url, ...(caption ? { caption: caption.slice(0, 1024) } : {}) },
+        [type]: {
+          link: url,
+          ...(caption ? { caption: caption.slice(0, 1024) } : {}),
+          ...(type === "document" && filename ? { filename } : {}),
+        },
       },
       { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, timeout: 15000 }
     )
@@ -1229,6 +1682,54 @@ async function sendWhatsAppUrlButton(to, { body, buttonText, url, footer, phoneN
     return Boolean(res.data?.messages?.[0]?.id)
   } catch (err) {
     console.error("WhatsApp button message failed, sending link as text:", err.response?.data || err.message)
+    return false
+  }
+}
+
+/**
+ * Sends tappable choices: up to 3 reply buttons, or a list (up to 10 rows,
+ * used when there are more options or descriptions). Customers can still
+ * type the number. Returns false if WhatsApp refused it, so the caller can
+ * send the numbered text instead.
+ */
+async function sendWhatsAppChoices(to, { body, options, button = "Choose", footer, phoneNumberId }) {
+  const numberId = whatsAppNumberId(phoneNumberId)
+  const token = process.env.WHATSAPP_ACCESS_TOKEN
+  const phone = normalizePhone(to).replace(/\D/g, "")
+  if (!numberId || !token || !phone || !options?.length || options.length > 10) return false
+  const asButtons = options.length <= 3 && options.every((o) => !o.description && o.title.length <= 20)
+  const interactive = asButtons
+    ? {
+        type: "button",
+        body: { text: body.slice(0, 1024) },
+        ...(footer ? { footer: { text: footer.slice(0, 60) } } : {}),
+        action: { buttons: options.map((o) => ({ type: "reply", reply: { id: o.id, title: o.title.slice(0, 20) } })) },
+      }
+    : {
+        type: "list",
+        body: { text: body.slice(0, 4096) },
+        ...(footer ? { footer: { text: footer.slice(0, 60) } } : {}),
+        action: {
+          button: button.slice(0, 20),
+          sections: [{
+            title: "Options",
+            rows: options.map((o) => ({
+              id: o.id,
+              title: o.title.slice(0, 24),
+              ...(o.description ? { description: o.description.slice(0, 72) } : {}),
+            })),
+          }],
+        },
+      }
+  try {
+    const res = await axios.post(
+      `https://graph.facebook.com/v19.0/${numberId}/messages`,
+      { messaging_product: "whatsapp", recipient_type: "individual", to: phone, type: "interactive", interactive },
+      { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, timeout: 15000 }
+    )
+    return Boolean(res.data?.messages?.[0]?.id)
+  } catch (err) {
+    console.error("WhatsApp choices message failed, sending text instead:", err.response?.data?.error?.message || err.message)
     return false
   }
 }
@@ -1297,7 +1798,7 @@ function buildCheckout(d, from) {
       title: `${label.replace(" - ", " plan \u00B7 ")}`,
       details: [
         ...(d.planCategory === "business" && d.businessName ? [`\u{1F3E2} ${d.businessName}`] : []),
-        `\u{1F4CD} ${d.address}`,
+        `\u{1F4CD} ${d.address}${d.location ? " (\u{1F4CC} pin shared)" : ""}`,
         `\u{1F4C5} Starts ${displayDate(d.startDate)}`,
       ],
       totalText: `${naira(amount)}/month`,
@@ -1306,7 +1807,7 @@ function buildCheckout(d, from) {
         customerName: d.planCategory === "business" ? (d.businessName || d.name) : d.name,
         businessName: d.planCategory === "business" ? (d.businessName ?? null) : null,
         contactName: d.name ?? null,
-        customerPhone: from, address: d.address,
+        customerPhone: from, address: d.address, location: d.location ?? null, outsideArea: d.outsideArea === true,
         plan: d.upgradePlan, planCategory: d.planCategory ?? null, planLabel: label,
         serviceType: d.serviceType, startDate: d.startDate, totalAmount: amount,
       },
@@ -1324,12 +1825,12 @@ function buildCheckout(d, from) {
       title: "Waste bags",
       details: [
         `\u{1F6CD} ${size} bags \u00D7 ${d.bagQuantity} pack${d.bagQuantity > 1 ? "s" : ""}`,
-        `\u{1F4CD} Deliver to: ${d.address}`,
+        `\u{1F4CD} Deliver to: ${d.address}${d.location ? " (\u{1F4CC} pin shared)" : ""}`,
       ],
       totalText: naira(d.bagTotal),
       doc: {
         customerName: d.name, customerPhone: from, bagSize: d.bagSize, quantity: d.bagQuantity,
-        totalAmount: d.bagTotal, deliveryAddress: d.address, serviceType: "wasteBags",
+        totalAmount: d.bagTotal, deliveryAddress: d.address, location: d.location ?? null, outsideArea: d.outsideArea === true, serviceType: "wasteBags",
       },
       doneTitle: "Payment received. Your order is confirmed!",
       nextSteps: "Expect delivery within 1-2 business days.",
@@ -1347,12 +1848,12 @@ function buildCheckout(d, from) {
     title: serviceLabel,
     details: [
       ...(d.bagCount ? [`\u{1F6CD} ${bagsText(d.bagCount)} \u00D7 ${naira(d.pricePerBag)}`] : []),
-      `\u{1F4CD} ${d.address}`,
+      `\u{1F4CD} ${d.address}${d.location ? " (\u{1F4CC} pin shared)" : ""}`,
       when,
     ],
     totalText: naira(amount),
     doc: {
-      customerName: d.name, customerPhone: from, address: d.address,
+      customerName: d.name, customerPhone: from, address: d.address, location: d.location ?? null, outsideArea: d.outsideArea === true,
       wasteType: d.wasteType ?? null, pickupDate: d.pickupDate, timeWindow: d.timeWindow ?? null,
       bagCount: d.bagCount ?? null, pricePerBag: d.pricePerBag ?? null, totalAmount: amount ?? null,
       serviceType: d.serviceType, serviceLabel,
@@ -1751,7 +2252,7 @@ nextApp.prepare().then(() => {
       if (!message) return { from: "", msg: "", hasImage: false, mediaId: null }
 
       const rawPhone = (message.from || "").toString().trim()
-      const normalizedFrom = rawPhone
+      const from = rawPhone
         ? `whatsapp:${rawPhone.startsWith("+") ? rawPhone : `+${rawPhone}`}`
         : ""
 
@@ -1780,14 +2281,29 @@ nextApp.prepare().then(() => {
       const unsupportedMedia = !hasImage && ["document", "audio", "video", "sticker"].includes(msgType)
       const mediaType = isReceiptDocument && docMime === "application/pdf" ? "pdf" : "image"
 
+      // Shared location pin (📎 → Location).
+      const loc = msgType === "location" ? message.location : null
+      const location = loc && Number.isFinite(Number(loc.latitude)) && Number.isFinite(Number(loc.longitude))
+        ? {
+            lat: Number(loc.latitude),
+            lng: Number(loc.longitude),
+            name: String(loc.name || "").slice(0, 200),
+            address: String(loc.address || "").slice(0, 300),
+          }
+        : null
+
       const messageId = message.id || null
       // `msg` is lowercased for matching commands and menu choices; `rawMsg`
       // keeps what the customer typed for names, addresses and descriptions.
       const phoneNumberId = value?.metadata?.phone_number_id || null
       const displayNumber = value?.metadata?.display_phone_number || null
+      // A tapped button or list row: match on its id (the menu number).
+      const replyId = msgType === "interactive"
+        ? message.interactive?.button_reply?.id || message.interactive?.list_reply?.id || ""
+        : ""
       return {
-        from: normalizedFrom, msg: text.toLowerCase().substring(0, 500), rawMsg: text,
-        hasImage, mediaId, mediaType, unsupportedMedia, messageId, phoneNumberId, displayNumber,
+        from: from, msg: (replyId || text).toLowerCase().substring(0, 500), rawMsg: text,
+        hasImage, mediaId, mediaType, unsupportedMedia, messageId, phoneNumberId, displayNumber, location,
       }
     } catch (e) {
       console.error("extractIncoming error:", e)
@@ -2042,7 +2558,7 @@ nextApp.prepare().then(() => {
   }
 
   async function handleIncoming({
-    from, msg, rawMsg = "", hasImage, mediaId, mediaType, unsupportedMedia, messageId, phoneNumberId, displayNumber,
+    from, msg, rawMsg = "", hasImage, mediaId, mediaType, unsupportedMedia, messageId, phoneNumberId, displayNumber, location,
   }) {
     if (displayNumber || phoneNumberId) rememberBusinessNumber(displayNumber, phoneNumberId).catch(() => {})
 
@@ -2058,6 +2574,19 @@ nextApp.prepare().then(() => {
         }
         throw err
       }
+    }
+
+    // Announcements opt-out / opt-in.
+    if (/^(unsubscribe|stop updates|stop promos?)[\s.!]*$/.test(msg)) {
+      await saveCustomer(from, { broadcastOptOut: true })
+      await sendWhatsAppMessage(from, "You won't receive WasteCore announcements any more. Reply *START UPDATES* to get them again. Your bookings and pickup messages are not affected.")
+      return
+    }
+    // ("subscribe" alone is left for customers who want a monthly plan.)
+    if (/^(start updates|subscribe( to)? updates)[\s.!]*$/.test(msg)) {
+      await saveCustomer(from, { broadcastOptOut: false })
+      await sendWhatsAppMessage(from, "\u2705 You'll receive WasteCore announcements again. Reply *UNSUBSCRIBE* anytime to stop.")
+      return
     }
 
     // Collectors: JOBS, DONE 2, FAILED 2 reason, a proof photo, SKIP.
@@ -2080,12 +2609,19 @@ nextApp.prepare().then(() => {
 
     const send = (text) => sendWhatsAppMessage(from, text)
 
+    // Tappable choices, or the same choices as numbered text.
+    const sendChoices = async ({ body, options, button, footer, fallback }) => {
+      if (await sendWhatsAppChoices(from, { body, options, button, footer, phoneNumberId })) return
+      await send(fallback ?? `${body}\n\n${numberedOptions(options)}\n\nReply with a number.`)
+    }
+
     // Loads the saved name (and business name) once per conversation.
     const ensureProfile = async () => {
       if (session.data.profileLoaded) return
       const profile = await loadCustomer(from)
       if (profile?.name && !session.data.name) session.data.name = profile.name
       if (profile?.businessName && !session.data.businessName) session.data.businessName = profile.businessName
+      if (profile?.lastAddress?.address) session.data.savedAddress = profile.lastAddress
       session.data.profileLoaded = true
     }
 
@@ -2094,7 +2630,13 @@ nextApp.prepare().then(() => {
       const greeting = session.data.name
         ? `Welcome back, ${displayName(session.data.name)}! \u{1F44B}`
         : "Welcome to WasteCore! \u267B\uFE0F"
-      await send(`${greeting}\n\n${SERVICE_MENU}\n\nReply with a number. Type *cancel* anytime to restart.`)
+      await sendChoices({
+        body: `${greeting}\n\nWhat would you like to do?`,
+        options: SERVICE_OPTIONS,
+        button: "Choose service",
+        footer: "Type cancel anytime to restart",
+        fallback: `${greeting}\n\n${SERVICE_MENU}\n\nReply with a number. Type *cancel* anytime to restart.`,
+      })
       session.step = "1.5"
     }
 
@@ -2124,33 +2666,196 @@ nextApp.prepare().then(() => {
           phoneNumberId,
         })
       }
-      await send(`Ready to book? \u{1F447}\n\n${SERVICE_MENU}\n\nReply with a number.`)
+      await sendChoices({ body: "Ready to book? \u{1F447}", options: SERVICE_OPTIONS, button: "Choose service" })
       session.step = "1.5"
     }
 
+    // ── My bookings: open pickups, bag orders and subscriptions ──────────
+    const customerBookings = async () => {
+      const today = lagosToday()
+      const [open, subscriberSnap, planSnap] = await Promise.all([
+        findActiveBookings(from, ["instantPickups", "pickupRequests", "wasteBagOrders"]),
+        db.collection("subscribers").get(),
+        db.collection("upgradeRequests").where("customerPhone", "==", from).get(),
+      ])
+      const items = open.map((b) => {
+        const d = b.data
+        if (b.collection === "wasteBagOrders") {
+          return { ...b, kind: "order", title: `Waste bags \u00B7 ${d.bagSize || ""} \u00D7${d.quantity ?? 1}`, description: `Status: ${d.status}` }
+        }
+        return {
+          ...b, kind: "pickup",
+          title: `${d.serviceType === "instant" ? "Instant" : d.serviceType === "scheduled" ? "Scheduled" : "Pickup"}${d.pickupDate ? ` \u00B7 ${shortDay(d.pickupDate)}` : ""}`,
+          description: `${d.timeWindow ? `${d.timeWindow.split(" (")[0]} \u00B7 ` : ""}Status: ${d.status}`,
+        }
+      })
+      // Subscriptions: dashboard subscribers on this number, and WhatsApp
+      // plans not yet managed as subscribers.
+      const mine = subscriberSnap.docs.filter((d) => toWhatsAppId(d.data().customerPhone) === from && d.data().status !== "cancelled")
+      const linked = new Set(subscriberSnap.docs.map((d) => d.data().linkedRequestId).filter(Boolean))
+      const plans = planSnap.docs.filter((d) => !linked.has(d.id) && d.data().status !== "cancelled")
+      for (const [collection, docs] of [["subscribers", mine], ["upgradeRequests", plans]]) {
+        for (const d of docs) {
+          const data = d.data()
+          const until = data.paidUntil
+          items.push({
+            collection, id: d.id, ref: d.ref, data, kind: "plan",
+            title: (() => {
+              const [category, n] = subscriptionPlanId(data).split("_")
+              return MONTHLY_PLANS[category] ? `${MONTHLY_PLANS[category].title} \u00B7 ${n}/week` : "Subscription"
+            })(),
+            description: !until ? "Payment not recorded yet"
+              : until < today ? `Expired ${displayDate(until)}` : `Paid until ${displayDate(until)}`,
+          })
+        }
+      }
+      return items.slice(0, 10)
+    }
+
+    const showMyBookings = async () => {
+      const items = await customerBookings()
+      if (!items.length) {
+        await send("You have no upcoming bookings or subscriptions right now.")
+        await sendServiceMenu()
+        return
+      }
+      session.data.myBookings = items.map((b) => ({ collection: b.collection, id: b.id, kind: b.kind }))
+      await sendChoices({
+        body: "\u{1F4CB} *Your bookings*\n\nChoose one to see what you can do.",
+        options: items.map((b, i) => ({ id: String(i + 1), title: b.title, description: b.description })),
+        button: "My bookings",
+        fallback: `\u{1F4CB} *Your bookings*\n\n${items.map((b, i) => `${i + 1} - ${b.title}\n     ${b.description}`).join("\n")}\n\nReply with a number.`,
+      })
+      session.step = "my_bookings"
+    }
+
+    // Loads the chosen booking again (it may have changed) and offers its
+    // actions, numbered ("cancel" itself would restart the conversation).
+    const BOOKING_ACTION_TITLES = { renew: "Renew now", date: "Change date", cancel: "Cancel booking", back: "Back" }
+    const showBookingActions = async (entry) => {
+      const snap = await db.collection(entry.collection).doc(entry.id).get()
+      const data = snap.exists ? snap.data() : null
+      session.data.myBooking = entry
+      if (!data) { await send("That booking can't be found any more."); session.step = "done"; return }
+      let body
+      let actions
+      if (entry.kind === "plan") {
+        const price = monthlyPrice(subscriptionPlanId(data))
+        const plan = subscriptionPlanText(subscriptionPlanId(data)).label
+        const status = !data.paidUntil ? "No payment recorded yet." : data.paidUntil < lagosToday()
+          ? `Expired on ${displayDate(data.paidUntil)}.` : `Paid until ${displayDate(data.paidUntil)}.`
+        body = `*${plan}*\n${status}${price ? `\n\u{1F4B0} ${naira(price)}/month` : ""}`
+        actions = [...(price ? ["renew"] : []), "back"]
+      } else if (!ACTIVE_STATUSES[entry.collection].includes(data.status)) {
+        await send(`This booking is already ${data.status}.`)
+        session.step = "done"
+        return
+      } else if (entry.kind === "order") {
+        body = `*Waste bag order*\n${data.bagSize || ""} bags \u00D7 ${data.quantity ?? 1}\nStatus: ${data.status}`
+        actions = ["cancel", "back"]
+      } else {
+        const when = data.pickupDate ? `${displayDate(data.pickupDate)}${data.timeWindow ? `, ${data.timeWindow}` : ""}` : ""
+        body = `*${PICKUP_SERVICE_LABELS[data.serviceType] || "Pickup"}*${when ? `\n\u{1F4C5} ${when}` : ""}\n\u{1F4CD} ${data.address || ""}\nStatus: ${data.status}`
+        actions = ["date", "cancel", "back"]
+      }
+      session.data.myBookingActions = actions
+      await sendChoices({ body, options: actions.map((a, i) => ({ id: String(i + 1), title: BOOKING_ACTION_TITLES[a] })) })
+      session.step = "my_booking_action"
+    }
+
+    // Cancels a pickup or bag order the customer chose, telling the team
+    // (and the collector, if one was assigned).
+    const cancelMyBooking = async (entry) => {
+      const ref = db.collection(entry.collection).doc(entry.id)
+      const snap = await ref.get()
+      const data = snap.exists ? snap.data() : null
+      if (!data || toWhatsAppId(data.customerPhone) !== from || !ACTIVE_STATUSES[entry.collection].includes(data.status)) {
+        await send("That booking can no longer be cancelled. Choose Speak to Support if you need help.")
+        return
+      }
+      const now = new Date().toISOString()
+      await ref.update({ status: "cancelled", cancelledBy: "customer", cancelledAt: now, updatedAt: now })
+      const paid = paymentVerified(data) || Boolean(data.paymentReceiptUrl)
+      const what = entry.kind === "order" ? "waste bag order" : `pickup${data.pickupDate ? ` on ${displayDate(data.pickupDate)}` : ""}`
+      await notifyAdmins({
+        key: `cancel_${entry.collection}_${entry.id}`,
+        type: "booking",
+        section: entry.collection === "instantPickups" ? "instant-pickups" : entry.collection === "pickupRequests" ? "pickup-requests" : "waste-bag-orders",
+        title: "Customer cancelled a booking",
+        body: `${data.customerName || normalizePhone(from)} cancelled their ${what}${paid ? ". Paid: arrange a refund." : "."}`,
+      })
+      if (data.collectorId && entry.kind === "pickup") {
+        const collector = await loadCollector(data.collectorId)
+        const phone = toWhatsAppId(collector?.phone)
+        if (phone) await sendWhatsAppMessage(phone, `\u274C *Pickup cancelled by the customer*\n\n${jobCustomer(data)}\n\u{1F4CD} ${data.address || ""}\n\u{1F4C5} ${shortDay(data.pickupDate)}`)
+      }
+      if (paid) {
+        await db.collection("supportTickets").add({
+          ticketId: `TKT-${Date.now().toString().slice(-6)}`,
+          customerName: data.customerName || "",
+          customerPhone: from,
+          category: "Refund request",
+          message: `Customer cancelled a paid ${what} (${naira(data.totalAmount ?? 0)}). Arrange a refund.`,
+          contactTime: "anytime",
+          relatedPickupId: entry.id,
+          relatedCollection: entry.collection,
+          status: "open",
+          createdAt: now,
+          updatedAt: now,
+        })
+      }
+      await send(`\u2705 Your ${what} has been cancelled.${paid ? " Our team will contact you about your refund." : ""}`)
+    }
+
     const showMonthlyPlans = async () => {
-      await send(monthlyPlansMenu(session.data.planCategory))
+      const c = MONTHLY_PLANS[session.data.planCategory]
+      await sendChoices({
+        body: `*${c.title} Plans*${c.footer ? `\n\n${c.footer}` : ""}\n\nHow many pickups a week?`,
+        options: [1, 2, 3].map((n) => ({
+          id: String(n),
+          title: `${n} pickup${n > 1 ? "s" : ""} per week`,
+          description: `NGN ${c.prices[n].toLocaleString()}/month`,
+        })),
+        button: "Choose plan",
+        fallback: monthlyPlansMenu(session.data.planCategory),
+      })
       session.step = "upgrade_select"
     }
+
+    const askPlanCategory = () => sendChoices({
+      body: `*Monthly Subscription*\n\n\u{1F3E2} *Business*: ${MONTHLY_PLANS.business.blurb}\n\u{1F3E0} *Household*: ${MONTHLY_PLANS.household.blurb}`,
+      options: [{ id: "1", title: "Business" }, { id: "2", title: "Household" }],
+      fallback: SUBSCRIPTION_CATEGORY_MENU,
+    })
+    const askBagSize = () => sendChoices({
+      body: "*Waste Bag Sizes*\n\nWhich size would you like?",
+      options: BAG_SIZE_OPTIONS,
+      button: "Choose size",
+      fallback: `Waste Bag Sizes\n\n1 - Small  NGN 500 (pack of 10)\n2 - Medium  NGN 900 (pack of 10)\n3 - Large  NGN 1,500 (pack of 10)\n\nReply 1, 2, or 3.`,
+    })
+    const askSupportCategory = () => sendChoices({
+      body: "*Support*\n\nWhat do you need help with?",
+      options: SUPPORT_OPTIONS,
+      button: "Choose topic",
+    })
 
     // Sends the first question of the chosen service and moves to its step.
     const beginService = async () => {
       switch (session.data.serviceType) {
         case "upgrade":
-          await send(SUBSCRIPTION_CATEGORY_MENU)
+          await askPlanCategory()
           session.step = "plan_category"
           break
         case "wasteBags":
-          await send(`Waste Bag Sizes\n\n1 - Small  NGN 500 (pack of 10)\n2 - Medium  NGN 900 (pack of 10)\n3 - Large  NGN 1,500 (pack of 10)\n\nReply 1, 2, or 3.`)
+          await askBagSize()
           session.step = "bags_select"
           break
         case "support":
-          await send(`Support Categories\n\n1 - Missed Pickup\n2 - Billing Issue\n3 - Driver Complaint\n4 - Change Pickup Date\n5 - Other\n\nReply with a number.`)
+          await askSupportCategory()
           session.step = "support_select"
           break
         default: // instant, scheduled
-          await send("Your pickup address?")
-          session.step = "pickup_address"
+          await askAddress("Your pickup address?", "pickup")
       }
     }
 
@@ -2211,12 +2916,126 @@ nextApp.prepare().then(() => {
       }
     }
 
+    // ── Addresses: typed, a location pin, or both ─────────────────────────
+    // Pins can be off in Bayelsa, so a typed address or landmark is always
+    // accepted, and asked for after a pin (SKIP uses the pin alone).
+    const ADDRESS_HOW =
+      "\u270D\uFE0F Type the address with a nearby landmark, e.g. _12 Okaka Road, opposite First Bank_\n" +
+      "\u{1F4CC} and/or share your location: tap \u{1F4CE} \u2192 *Location* \u2192 *Send your current location*"
+    const pinLabel = (loc) => [loc?.name, loc?.address].filter(Boolean).join(", ") || "Location pin"
+
+    const askAddress = async (question, kind) => {
+      await ensureProfile()
+      const saved = session.data.savedAddress
+      const text = [
+        `*${question}*`,
+        "",
+        ...(saved ? [`Reply *1* to use your last address:`, `\u{1F4CD} ${saved.address}${saved.location ? " (\u{1F4CC} pin)" : ""}`, "", "Or:"] : []),
+        ADDRESS_HOW,
+      ].join("\n")
+      if (saved) {
+        await sendChoices({
+          body: text.replace("Reply *1* to use your last address:", "Your last address:"),
+          options: [{ id: "1", title: "Use last address" }],
+          fallback: text,
+        })
+      } else {
+        await send(text)
+      }
+      session.step = `${kind}_address`
+    }
+
+    // What comes after the address for each service.
+    const afterAddress = async (kind) => {
+      saveCustomer(from, { lastAddress: { address: session.data.address, location: session.data.location ?? null } })
+        .catch((err) => console.error("Could not save the last address:", err.message))
+      if (kind === "upgrade") {
+        await askDate("When should your plan start?")
+        session.step = "upgrade_date"
+      } else if (kind === "bags") {
+        await startCheckout("bags_payment")
+      } else {
+        await askBagsOrDate()
+      }
+    }
+
+    // A pin far outside the service area is flagged (booking still allowed).
+    const checkServiceArea = async (loc) => {
+      session.data.outsideArea = outsideServiceArea(loc)
+      if (session.data.outsideArea) {
+        await send(
+          `\u26A0\uFE0F This location looks outside our current service area (${SERVICE_AREA}). ` +
+          "You can still book, and our team will confirm with you before the pickup."
+        )
+      }
+    }
+
+    const handleAddressReply = async (kind) => {
+      if (location) {
+        session.data.location = location
+        await checkServiceArea(location)
+        await sendChoices({
+          body: "\u{1F4CC} Got your location pin, thanks!\n\n" +
+            "Now *type the address or a landmark* so the collector can find you easily (pins can be a little off).",
+          options: [{ id: "skip", title: "Use pin only" }],
+          fallback: "\u{1F4CC} Got your location pin, thanks!\n\n" +
+            "Now *type the address or a landmark* so the collector can find you easily (pins can be a little off).\n\n" +
+            "Reply *SKIP* to use the pin only.",
+        })
+        session.step = `${kind}_address_details`
+        return
+      }
+      if (msg === "1" && session.data.savedAddress) {
+        session.data.address = session.data.savedAddress.address
+        session.data.location = session.data.savedAddress.location ?? null
+        session.data.outsideArea = outsideServiceArea(session.data.location)
+        return afterAddress(kind)
+      }
+      if (!rawMsg.trim()) {
+        await send(`Please send your address.\n\n${ADDRESS_HOW}`)
+        return
+      }
+      session.data.address = rawMsg.substring(0, 300)
+      session.data.location = null
+      session.data.outsideArea = false
+      await afterAddress(kind)
+    }
+
+    const handleAddressDetails = async (kind) => {
+      if (location) {
+        session.data.location = location
+        await checkServiceArea(location)
+        await send("\u{1F4CC} Pin updated. Now type the address or a landmark, or reply *SKIP*.")
+        return
+      }
+      if (/^skip[\s.!]*$/.test(msg)) {
+        session.data.address = pinLabel(session.data.location)
+      } else if (rawMsg.trim()) {
+        session.data.address = rawMsg.substring(0, 300)
+      } else {
+        await send("Please type the address or a landmark, or reply *SKIP* to use the pin only.")
+        return
+      }
+      await afterAddress(kind)
+    }
+
     const DATE_HINT = "Reply *today*, *tomorrow* or a date like 30/03/2026."
-    const askPickupDate = () => send(
-      session.data.serviceType === "scheduled"
-        ? `Which date should we come?\n\n${DATE_HINT}`
-        : `When should we pick up?\n\n${DATE_HINT}`
-    )
+    // Today / Tomorrow buttons; any other date can be typed.
+    const askDate = (question) => sendChoices({
+      body: `${question}\n\nTap a button or type a date like 30/03/2026.`,
+      options: [{ id: "today", title: "Today" }, { id: "tomorrow", title: "Tomorrow" }],
+      fallback: `${question}\n\n${DATE_HINT}`,
+    })
+    const askPickupDate = () => {
+      if (session.data.serviceType === "instant" && instantCutoffPassed()) {
+        return sendChoices({
+          body: `When should we pick up?\n\nInstant pickups booked after ${cutoffLabel()} are collected the next day. Tap Tomorrow or type a later date like 30/03/2026.`,
+          options: [{ id: "tomorrow", title: "Tomorrow" }],
+          fallback: `When should we pick up?\n\nInstant pickups booked after ${cutoffLabel()} are collected the next day. Reply *tomorrow* or a later date like 30/03/2026.`,
+        })
+      }
+      return askDate(session.data.serviceType === "scheduled" ? "Which date should we come?" : "When should we pick up?")
+    }
 
     // Reads a date reply; tells the customer what's wrong and returns null
     // if it isn't a valid date from today on.
@@ -2257,6 +3076,64 @@ nextApp.prepare().then(() => {
     }
 
     try {
+      // ── Rating replies (tapped stars, or a single digit while idle) ─────
+      const ratingTap = msg.match(/^rate_([1-5])$/)
+      if (ratingTap || ((session.step === "0" || session.step === "done") && /^[1-5]$/.test(msg))) {
+        const profile = await loadCustomer(from)
+        const pending = profile?.pendingRating
+        if (pending && Date.parse(pending.until) > Date.now()) {
+          const stars = Number(ratingTap ? ratingTap[1] : msg)
+          const jobRef = db.collection(pending.collection).doc(pending.id)
+          const job = (await jobRef.get()).data() || {}
+          await jobRef.update({ rating: { stars, at: new Date().toISOString() } })
+          await saveCustomer(from, { pendingRating: null })
+          if (stars <= 3) {
+            await notifyAdmins({
+              key: `rating_${pending.collection}_${pending.id}`,
+              type: "support",
+              section: "collectors",
+              title: `${"\u2B50".repeat(stars)} Low rating (${stars}/5)`,
+              body: `${job.customerName || normalizePhone(from)}${job.collectorName ? ` · collector ${job.collectorName}` : ""}. Waiting for their comment.`,
+            })
+            session = { step: "rating_comment", data: { ratingFor: pending, stars } }
+            await send("We're sorry it wasn't great. \u{1F64F} What went wrong? Your answer goes straight to our team.")
+            await sessionsRef.set(session)
+          } else {
+            await send(`Thank you for the ${stars}-star rating! \u{1F49A} Reply *hi* anytime to book again.`)
+          }
+          return
+        }
+        if (ratingTap) {
+          await send("Thanks! This pickup was already rated. Reply *hi* to see the menu.")
+          return
+        }
+      }
+
+      if (session.step === "rating_comment") {
+        const { ratingFor, stars } = session.data
+        const comment = rawMsg.trim().slice(0, 500)
+        const jobRef = db.collection(ratingFor.collection).doc(ratingFor.id)
+        const job = (await jobRef.get()).data() || {}
+        const now = new Date().toISOString()
+        await jobRef.update({ rating: { ...(job.rating || { stars }), comment } })
+        await db.collection("supportTickets").add({
+          ticketId: `TKT-${Date.now().toString().slice(-6)}`,
+          customerName: job.customerName || "",
+          customerPhone: from,
+          category: "Pickup feedback",
+          message: `${stars}/5 stars${job.collectorName ? ` (collector ${job.collectorName})` : ""}: ${comment || "(no comment)"}`,
+          contactTime: "anytime",
+          relatedPickupId: ratingFor.id,
+          relatedCollection: ratingFor.collection,
+          status: "open",
+          createdAt: now,
+          updatedAt: now,
+        })
+        await send("Thank you for telling us. Our team will look into it and may contact you.")
+        await sessionsRef.delete().catch(() => {})
+        return
+      }
+
       // ── Active request check (only at conversation start) ────────────────
       if (session.step === "0" || session.step === "0.5") {
         const [active] = await findActiveBookings(from)
@@ -2265,11 +3142,14 @@ nextApp.prepare().then(() => {
           const when = d.pickupDate ? `\n\u{1F4C5} ${displayDate(d.pickupDate)}${d.timeWindow ? ` \u00B7 ${d.timeWindow}` : ""}`
             : d.startDate ? `\n\u{1F4C5} Starts ${displayDate(d.startDate)}` : ""
           await ensureProfile()
-          await send(
+          const intro =
             `${session.data.name ? `Welcome back, ${displayName(session.data.name)}! \u{1F44B}\n\n` : ""}` +
-            `You have a booking in progress:\n\n*${bookingLabel(active)}*${when}\nStatus: ${d.status}\n\n` +
-            `What would you like to do?\n1 - Book another service\n2 - Order Waste Bags\n3 - Speak to Support\n\nReply with a number.`
-          )
+            `You have a booking in progress:\n\n*${bookingLabel(active)}*${when}\nStatus: ${d.status}\n\nWhat would you like to do?`
+          await sendChoices({
+            body: intro,
+            options: [{ id: "1", title: "Book a service" }, { id: "2", title: "My bookings" }, { id: "3", title: "Support" }],
+            fallback: `${intro}\n1 - Book another service\n2 - My bookings (change date, cancel, renew)\n3 - Speak to Support\n\nReply with a number.`,
+          })
           session.step = "active_menu"
           await sessionsRef.set(session)
           return
@@ -2295,8 +3175,7 @@ nextApp.prepare().then(() => {
           if (msg === "1") {
             await sendServiceMenu()
           } else if (msg === "2") {
-            session.data.serviceType = "wasteBags"
-            await continueWithService()
+            await showMyBookings()
           } else if (msg === "3") {
             session.data.serviceType = "support"
             await continueWithService()
@@ -2310,7 +3189,7 @@ nextApp.prepare().then(() => {
           session.data.name = rawMsg.substring(0, 100)
           await saveCustomer(from, { name: session.data.name })
           if (!session.data.serviceType) {
-            await send(SERVICE_MENU)
+            await sendChoices({ body: "What would you like to do?", options: SERVICE_OPTIONS, button: "Choose service" })
             session.step = "1.5"
           } else {
             await beginService()
@@ -2324,7 +3203,8 @@ nextApp.prepare().then(() => {
           else if (msg === "4") session.data.serviceType = "wasteBags"
           else if (msg === "5") session.data.serviceType = "support"
           else if (msg === "6") { await sendAbout(); break }
-          else { await send("Reply with a number from 1 to 6."); break }
+          else if (msg === "7") { await showMyBookings(); break }
+          else { await send("Reply with a number from 1 to 7."); break }
           await continueWithService()
           break
 
@@ -2341,14 +3221,20 @@ nextApp.prepare().then(() => {
           else if (msg === "3") session.data.weeklyPlan = "weekly_3"
           else { await send("Please reply 1, 2, or 3."); break }
           session.data.serviceType = session.data.weeklyPlan
-          await send("Your pickup address?")
-          session.step = "pickup_address"
+          await askAddress("Your pickup address?", "pickup")
           break
 
         // ── INSTANT & SCHEDULED PICKUP FLOW ────────────────────────────────
         case "pickup_address":
-          session.data.address = rawMsg.substring(0, 300)
-          await askBagsOrDate()
+        case "upgrade_address":
+        case "bags_address":
+          await handleAddressReply(session.step.replace("_address", ""))
+          break
+
+        case "pickup_address_details":
+        case "upgrade_address_details":
+        case "bags_address_details":
+          await handleAddressDetails(session.step.replace("_address_details", ""))
           break
 
         // Waste type is no longer asked; kept for conversations already at this step.
@@ -2378,11 +3264,19 @@ nextApp.prepare().then(() => {
         }
 
         case "pickup_date": {
-          const date = await readFutureDate()
+          let date = await readFutureDate()
           if (!date) break
+          if (session.data.serviceType === "instant" && date === lagosToday() && instantCutoffPassed()) {
+            date = addDays(date, 1)
+            await send(`\u{1F552} Instant pickups booked after ${cutoffLabel()} are collected the next day, so we've set yours for *tomorrow, ${displayDate(date)}*.`)
+          }
           session.data.pickupDate = date
           if (session.data.serviceType === "scheduled") {
-            await send("Preferred pickup time?\n\n1 - Morning (8am-12pm)\n2 - Afternoon (12pm-4pm)\n3 - Evening (4pm-7pm)\n\nReply 1, 2, or 3.")
+            await sendChoices({
+              body: "Preferred pickup time?",
+              options: TIME_WINDOW_OPTIONS,
+              fallback: "Preferred pickup time?\n\n1 - Morning (8am-12pm)\n2 - Afternoon (12pm-4pm)\n3 - Evening (4pm-7pm)\n\nReply 1, 2, or 3.",
+            })
             session.step = "pickup_time"
             break
           }
@@ -2402,7 +3296,7 @@ nextApp.prepare().then(() => {
 
         // ── MONTHLY SUBSCRIPTION FLOW ──────────────────────────────────────
         case "upgrade_choose":
-          await send(SUBSCRIPTION_CATEGORY_MENU)
+          await askPlanCategory()
           session.step = "plan_category"
           break
 
@@ -2440,15 +3334,9 @@ nextApp.prepare().then(() => {
           if (!["1", "2", "3"].includes(msg)) { await send("Please reply 1, 2, or 3."); break }
           session.data.upgradePlan = `${session.data.planCategory || "business"}_${msg}`
           session.data.serviceType = `upgrade_${session.data.upgradePlan}`
-          await send("Your pickup address for this plan?")
-          session.step = "upgrade_address"
+          await askAddress("Your pickup address for this plan?", "upgrade")
           break
 
-        case "upgrade_address":
-          session.data.address = rawMsg.substring(0, 300)
-          await send(`When should your plan start?\n\n${DATE_HINT}`)
-          session.step = "upgrade_date"
-          break
 
         case "upgrade_date": {
           const date = await readFutureDate()
@@ -2464,7 +3352,7 @@ nextApp.prepare().then(() => {
 
         // ── WASTE BAGS FLOW ────────────────────────────────────────────────
         case "bags_choose":
-          await send(`Waste Bag Sizes\n\n1 - Small  NGN 500 (pack of 10)\n2 - Medium  NGN 900 (pack of 10)\n3 - Large  NGN 1,500 (pack of 10)\n\nReply 1, 2, or 3.`)
+          await askBagSize()
           session.step = "bags_select"
           break
 
@@ -2486,15 +3374,10 @@ nextApp.prepare().then(() => {
             }
             session.data.bagQuantity = qty
             session.data.bagTotal = SERVICE_PRICES[`wasteBags_${session.data.bagSize}`] * qty
-            await send("Delivery address?")
-            session.step = "bags_address"
+            await askAddress("Delivery address?", "bags")
           }
           break
 
-        case "bags_address":
-          session.data.address = rawMsg.substring(0, 300)
-          await startCheckout("bags_payment")
-          break
 
         case "bags_payment":
           if (await saveReceiptBooking()) session.step = "done"
@@ -2502,7 +3385,7 @@ nextApp.prepare().then(() => {
 
         // ── SUPPORT FLOW ───────────────────────────────────────────────────
         case "support_category":
-          await send(`Support Categories\n\n1 - Missed Pickup\n2 - Billing Issue\n3 - Driver Complaint\n4 - Change Pickup Date\n5 - Other\n\nReply with a number.`)
+          await askSupportCategory()
           session.step = "support_select"
           break
 
@@ -2535,6 +3418,63 @@ nextApp.prepare().then(() => {
             }
             await send("Please describe your issue in detail.")
             session.step = "support_describe"
+          }
+          break
+
+        // ── MY BOOKINGS ────────────────────────────────────────────────────
+        case "my_bookings": {
+          const entry = session.data.myBookings?.[Number(msg) - 1]
+          if (!/^\d+$/.test(msg) || !entry) { await send("Please choose one of your bookings, or type *cancel* to go back to the menu."); break }
+          await showBookingActions(entry)
+          break
+        }
+
+        case "my_booking_action": {
+          const entry = session.data.myBooking
+          const action = /^\d+$/.test(msg) ? session.data.myBookingActions?.[Number(msg) - 1] : null
+          if (action === "back") { await showMyBookings(); break }
+          if (action === "renew") {
+            const snap = await db.collection(entry.collection).doc(entry.id).get()
+            const data = snap.data() || {}
+            const price = monthlyPrice(subscriptionPlanId(data))
+            if (!price || !PUBLIC_BASE_URL) { await send("Online renewal isn't available for this plan. Choose Speak to Support and we'll help."); session.step = "done"; break }
+            const { url } = await createRenewalLink(entry.collection, entry.id, from)
+            const plan = subscriptionPlanText(subscriptionPlanId(data)).label
+            const body = `\u{1F504} *Renew your subscription*\n\n*${plan}*\n\u{1F4B0} ${naira(price)} for 1 month\n\nTap *Pay* to pay securely by card, bank transfer or USSD.`
+            const sentButton = await sendWhatsAppUrlButton(from, { body, buttonText: `Pay ${naira(price)}`, url, footer: "\u{1F512} Secured by Paystack", phoneNumberId })
+            if (!sentButton) await send(`${body}\n\n${url}`)
+            session.step = "done"
+            break
+          }
+          if (action === "date") {
+            const snap = await db.collection(entry.collection).doc(entry.id).get()
+            session.data.changePickup = { collection: entry.collection, id: entry.id, oldDate: snap.data()?.pickupDate ?? null }
+            await askDate("What new date would you like?")
+            session.step = "change_date"
+            break
+          }
+          if (action === "cancel") {
+            await sendChoices({
+              body: "Are you sure you want to cancel this booking?",
+              options: [{ id: "yes", title: "Yes, cancel it" }, { id: "no", title: "No, keep it" }],
+              fallback: "Are you sure you want to cancel this booking? Reply *YES* or *NO*.",
+            })
+            session.step = "my_booking_cancel"
+            break
+          }
+          await send("Please reply with one of the numbers shown, or type *cancel* to go back to the menu.")
+          break
+        }
+
+        case "my_booking_cancel":
+          if (msg === "yes") {
+            await cancelMyBooking(session.data.myBooking)
+            session.step = "done"
+          } else if (msg === "no") {
+            await send("OK, your booking is unchanged.")
+            session.step = "done"
+          } else {
+            await send("Please reply *YES* to cancel the booking or *NO* to keep it.")
           }
           break
 
@@ -2641,7 +3581,7 @@ nextApp.prepare().then(() => {
     const cutoff = Date.now() - 15 * 60 * 1000
     for (const [ip, times] of attempts) if (times.every((t) => t < cutoff)) attempts.delete(ip)
   }, 15 * 60 * 1000).unref()
-  app.use(["/api/admin-auth/setup", "/api/sub-admins", "/api/push"], rateLimit)
+  app.use(["/api/admin-auth/setup", "/api/sub-admins", "/api/push", "/api/broadcasts"], rateLimit)
 
   const ADMIN_EMAIL_DOMAIN = "admins.wastecore.local"
   const USERNAME_RE = /^[a-z0-9._-]{3,30}$/
@@ -2730,6 +3670,21 @@ nextApp.prepare().then(() => {
     }
   })
 
+  // Sub-admin permission switches (must match lib/permissions.ts).
+  const SUB_ADMIN_PERMISSIONS = ["viewRevenue", "recordPayments", "deleteRecords", "sendBroadcasts"]
+
+  // Activity log entries for actions taken through the server.
+  async function logAdminActivity(uid, action, details = {}) {
+    try {
+      const profile = await db.collection("admins").doc(uid).get()
+      await db.collection("activityLog").add({
+        uid, username: profile.data()?.username || "", action, ...details, at: new Date().toISOString(),
+      })
+    } catch (err) {
+      console.error("Activity log failed:", err.message)
+    }
+  }
+
   // Any signed-in, active admin (main or sub).
   async function requireAdmin(req, res, next) {
     try {
@@ -2743,6 +3698,44 @@ nextApp.prepare().then(() => {
       res.status(401).json({ error: "Please sign in again." })
     }
   }
+
+  // Main admin, or a sub-admin with the given permission switched on.
+  const requirePermission = (permission) => async (req, res, next) => {
+    const profile = await db.collection("admins").doc(req.adminUid).get()
+    const data = profile.data() || {}
+    if (data.role === "main" || data.permissions?.[permission] === true) return next()
+    res.status(403).json({ error: "You don't have permission to do this. Ask the main admin." })
+  }
+
+  // ── Broadcasts ────────────────────────────────────────────────────────────
+  // { audience, message, preview } -> { count } (preview) or { id, count }.
+  app.post("/api/broadcasts", requireAdmin, requirePermission("sendBroadcasts"), async (req, res) => {
+    const audience = String(req.body?.audience || "")
+    const message = String(req.body?.message || "").replace(/\s+/g, " ").trim()
+    if (!BROADCAST_AUDIENCES.includes(audience)) return res.status(400).json({ error: "Choose who to send to." })
+    if (!req.body?.preview && (message.length < 5 || message.length > 900)) {
+      return res.status(400).json({ error: "Write a message between 5 and 900 characters." })
+    }
+    try {
+      const recipients = await broadcastRecipients(audience)
+      if (req.body?.preview) return res.json({ count: recipients.size })
+      if (!recipients.size) return res.status(400).json({ error: "No customers in this group." })
+      const profile = await db.collection("admins").doc(req.adminUid).get()
+      const ref = await db.collection("broadcasts").add({
+        audience, message, total: recipients.size, sent: 0, failed: 0, status: "sending",
+        createdBy: profile.data()?.username || "", createdAt: new Date().toISOString(),
+      })
+      await logAdminActivity(req.adminUid, "Sent broadcast", { audience, count: recipients.size, message: message.slice(0, 120) })
+      res.json({ id: ref.id, count: recipients.size })
+      runBroadcast(ref, recipients, message).catch((err) => {
+        console.error("Broadcast failed:", err)
+        ref.update({ status: "failed" }).catch(() => {})
+      })
+    } catch (err) {
+      console.error("Broadcast setup failed:", err)
+      res.status(500).json({ error: "Could not send the broadcast. Please try again." })
+    }
+  })
 
   // ── Push notifications for admins' devices ────────────────────────────────
   app.get("/api/push/key", async (req, res) => {
@@ -2787,6 +3780,7 @@ nextApp.prepare().then(() => {
         password: creds.password,
         displayName: creds.username,
       })
+      await logAdminActivity(req.adminUid, "Added sub-admin", { target: creds.username })
       await db.collection("admins").doc(user.uid).set({
         username: creds.username,
         role: "sub",
@@ -2815,14 +3809,35 @@ nextApp.prepare().then(() => {
       }
       if (typeof req.body?.active === "boolean") authUpdate.disabled = !req.body.active
 
-      if (!Object.keys(authUpdate).length) return res.status(400).json({ error: "Nothing to update." })
-      await admin.auth().updateUser(req.params.uid, authUpdate)
-      // Sign them out everywhere after a password change or deactivation.
-      await admin.auth().revokeRefreshTokens(req.params.uid)
+      // Permission switches: only known names, true/false.
+      let permissions = null
+      if (req.body?.permissions && typeof req.body.permissions === "object") {
+        permissions = { ...(doc.data().permissions || {}) }
+        for (const [key, value] of Object.entries(req.body.permissions)) {
+          if (!SUB_ADMIN_PERMISSIONS.includes(key) || typeof value !== "boolean") {
+            return res.status(400).json({ error: `Unknown permission: ${key}` })
+          }
+          permissions[key] = value
+        }
+      }
+
+      if (!Object.keys(authUpdate).length && !permissions) return res.status(400).json({ error: "Nothing to update." })
+      if (Object.keys(authUpdate).length) {
+        await admin.auth().updateUser(req.params.uid, authUpdate)
+        // Sign them out everywhere after a password change or deactivation.
+        await admin.auth().revokeRefreshTokens(req.params.uid)
+      }
       await doc.ref.update({
         ...(typeof req.body?.active === "boolean" ? { active: req.body.active } : {}),
+        ...(permissions ? { permissions } : {}),
         updatedAt: new Date().toISOString(),
       })
+      const changes = [
+        authUpdate.password && "reset password",
+        typeof req.body?.active === "boolean" && (req.body.active ? "activated" : "deactivated"),
+        permissions && "changed permissions",
+      ].filter(Boolean).join(", ")
+      await logAdminActivity(req.adminUid, "Updated sub-admin", { target: doc.data().username, changes })
       res.json({ ok: true })
     } catch (err) {
       console.error("sub-admin update failed:", err)
@@ -2838,6 +3853,7 @@ nextApp.prepare().then(() => {
         if (err?.code !== "auth/user-not-found") throw err
       })
       await doc.ref.delete()
+      await logAdminActivity(req.adminUid, "Deleted sub-admin", { target: doc.data().username })
       res.json({ ok: true })
     } catch (err) {
       console.error("sub-admin delete failed:", err)
@@ -2893,6 +3909,20 @@ nextApp.prepare().then(() => {
         ? "Thank you! Your payment is confirmed and the details are on WhatsApp. You can close this page."
         : "If you completed the payment, you'll get a WhatsApp confirmation shortly. Otherwise go back to WhatsApp and type <b>hi</b> to try again.",
     }))
+  })
+
+  // PDF receipts: the link (sent to the customer and shown to admins) is
+  // the only way in; the token is random.
+  app.get("/receipts/:file", async (req, res) => {
+    const token = String(req.params.file).replace(/\.pdf$/i, "").slice(0, 64)
+    try {
+      const snap = await db.collection("receipts").doc(token).get()
+      if (!snap.exists) return res.status(404).type("html").send(brandedPage({ ok: false, title: "Receipt not found", body: "This receipt link isn't valid. Message us on WhatsApp for a copy." }))
+      renderReceiptPdf(snap.data(), res)
+    } catch (err) {
+      console.error("Receipt failed:", err)
+      res.status(500).send("Could not load the receipt. Please try again.")
+    }
   })
 
   // "Renew now" link from a renewal reminder: starts a fresh Paystack

@@ -64,6 +64,8 @@ import {
   UserPlus,
 } from "lucide-react"
 import { FirebaseService } from "@/lib/firebase-service"
+import { useAdminAuth } from "@/lib/admin-auth"
+import { can } from "@/lib/permissions"
 import type { PaymentInput, SubscriberInput, SubscriberStatus, SubscriptionRow } from "@/lib/types"
 import {
   SUBSCRIPTION_KINDS,
@@ -77,6 +79,7 @@ import {
   type SubscriptionKind,
 } from "@/lib/subscriptions"
 import { cn } from "@/lib/utils"
+import { MapPinLink } from "@/components/map-pin-link"
 
 const ALL = "__all__"
 
@@ -187,6 +190,9 @@ interface SubscriptionsManagerProps {
 }
 
 export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerProps) {
+  const { profile } = useAdminAuth()
+  const mayRecordPayments = can(profile, "recordPayments")
+  const mayDelete = can(profile, "deleteRecords")
   const [rows, setRows] = useState<SubscriptionRow[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -326,7 +332,8 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
       : await FirebaseService.createSubscriber(
         input,
         sendWhatsApp,
-        rows.find((r) => r.source === "whatsapp" && r.id === input.linkedRequestId)?.payment
+        rows.find((r) => r.source === "whatsapp" && r.id === input.linkedRequestId)?.payment,
+        rows.find((r) => r.source === "whatsapp" && r.id === input.linkedRequestId)?.location
       )
     if (!ok) setError(`Could not save ${input.customerName}. Please try again.`)
   }
@@ -516,6 +523,7 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
                       <div className="flex max-w-56 items-center gap-2">
                         <MapPin className="h-4 w-4 flex-shrink-0 text-gray-400" />
                         <span className="truncate text-sm">{r.address || "—"}</span>
+                        <MapPinLink pin={r.location} />
                       </div>
                     </TableCell>
                     <TableCell>
@@ -598,9 +606,11 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
                             </DropdownMenuItem>
                             {paymentState(r, today).state !== "na" && (
                               <>
-                                <DropdownMenuItem onClick={() => openPayment(r)}>
-                                  <Wallet className="mr-2 h-4 w-4" /> Record payment
-                                </DropdownMenuItem>
+                                {mayRecordPayments && (
+                                  <DropdownMenuItem onClick={() => openPayment(r)}>
+                                    <Wallet className="mr-2 h-4 w-4" /> Record payment
+                                  </DropdownMenuItem>
+                                )}
                                 <DropdownMenuItem
                                   disabled={r.renewalReminder?.status === "sending"}
                                   onClick={() => sendReminders([r])}
@@ -624,9 +634,11 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
                             </DropdownMenuItem>
                             {paymentState(r, today).state !== "na" && (
                               <>
-                                <DropdownMenuItem onClick={() => openPayment(r)}>
-                                  <Wallet className="mr-2 h-4 w-4" /> Record payment
-                                </DropdownMenuItem>
+                                {mayRecordPayments && (
+                                  <DropdownMenuItem onClick={() => openPayment(r)}>
+                                    <Wallet className="mr-2 h-4 w-4" /> Record payment
+                                  </DropdownMenuItem>
+                                )}
                                 <DropdownMenuItem
                                   disabled={r.renewalReminder?.status === "sending"}
                                   onClick={() => sendReminders([r])}
@@ -650,9 +662,11 @@ export function SubscriptionsManager({ searchQuery = "" }: SubscriptionsManagerP
                                 <Play className="mr-2 h-4 w-4" /> Resume
                               </DropdownMenuItem>
                             )}
-                            <DropdownMenuItem className="text-destructive" onClick={() => setDeleting(r)}>
-                              <Trash2 className="mr-2 h-4 w-4" /> Delete
-                            </DropdownMenuItem>
+                            {mayDelete && (
+                              <DropdownMenuItem className="text-destructive" onClick={() => setDeleting(r)}>
+                                <Trash2 className="mr-2 h-4 w-4" /> Delete
+                              </DropdownMenuItem>
+                            )}
                           </DropdownMenuContent>
                         </DropdownMenu>
                       )}

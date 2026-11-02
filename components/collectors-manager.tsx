@@ -59,12 +59,17 @@ import {
   Pencil,
   Phone,
   Trash2,
+  TrendingUp,
   UserPlus,
   Users,
 } from "lucide-react"
 import { FirebaseService } from "@/lib/firebase-service"
+import { CollectorPerformance } from "@/components/collector-performance"
+import { useAdminAuth } from "@/lib/admin-auth"
+import { can } from "@/lib/permissions"
 import { WEEK_DAYS, findPlan, planFullLabel } from "@/lib/subscriptions"
 import type { Collector, CollectorInput, CollectorPickup, PickupStatus, SubscriptionRow } from "@/lib/types"
+import { MapPinLink, mapPinUrl } from "@/components/map-pin-link"
 
 const UNASSIGNED = "__unassigned__"
 const ALL = "__all__"
@@ -106,7 +111,9 @@ function toWhatsAppNumber(phone: string): string {
 }
 
 function collectorMessage(pickup: CollectorPickup, collector: Collector): string {
-  const mapLink = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(pickup.address)}`
+  const mapLink = pickup.location
+    ? mapPinUrl(pickup.location)
+    : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(pickup.address)}`
   return [
     `Hello ${collector.name}, you have a new WasteCore pickup.`,
     "",
@@ -162,6 +169,7 @@ function visitsForDate(date: string, subscribers: SubscriptionRow[], saved: Coll
         pickupDate: date,
         serviceType: plan ? planFullLabel(plan) : "Subscription",
         timeWindow: VISIT_TIME_LABELS[s.timeWindow] ?? "",
+        location: s.location ?? null,
         status: "pending",
         collectorId: null,
         collectorName: "",
@@ -197,6 +205,8 @@ interface CollectorsManagerProps {
 }
 
 export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) {
+  const { profile } = useAdminAuth()
+  const mayDelete = can(profile, "deleteRecords")
   const [collectors, setCollectors] = useState<Collector[]>([])
   const [pickups, setPickups] = useState<CollectorPickup[]>([])
   const [visits, setVisits] = useState<CollectorPickup[]>([])
@@ -412,6 +422,11 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
             ))}
           </SelectContent>
         </Select>
+        {p.rating && (
+          <span className="text-[11px] text-amber-600" title={p.rating.comment || undefined}>
+            {"★".repeat(p.rating.stars)}{"☆".repeat(5 - p.rating.stars)} customer rating
+          </span>
+        )}
         {report && isOpen(p) && (
           <div className="max-w-44 text-[11px]">
             {report.status === "done" ? (
@@ -498,6 +513,9 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
           <TabsTrigger value="pickups">
             <ClipboardList className="w-4 h-4 mr-2" /> Assign Pickups
           </TabsTrigger>
+          <TabsTrigger value="performance">
+            <TrendingUp className="w-4 h-4 mr-2" /> Performance
+          </TabsTrigger>
         </TabsList>
 
         {/* ── Collectors list ─────────────────────────────────────────────── */}
@@ -569,9 +587,11 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
                               <DropdownMenuItem onClick={() => openEdit(c)}>
                                 <Pencil className="w-4 h-4 mr-2" /> Edit
                               </DropdownMenuItem>
-                              <DropdownMenuItem className="text-destructive" onClick={() => setDeleting(c)}>
-                                <Trash2 className="w-4 h-4 mr-2" /> Delete
-                              </DropdownMenuItem>
+                              {mayDelete && (
+                                <DropdownMenuItem className="text-destructive" onClick={() => setDeleting(c)}>
+                                  <Trash2 className="w-4 h-4 mr-2" /> Delete
+                                </DropdownMenuItem>
+                              )}
                             </DropdownMenuContent>
                           </DropdownMenu>
                         </TableCell>
@@ -643,6 +663,7 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
                         <div className="flex items-center gap-2">
                           <MapPin className="w-4 h-4 text-gray-400" />
                           <span className="text-sm max-w-xs truncate">{v.address || "—"}</span>
+                          <MapPinLink pin={v.location} outsideArea={(v as any).outsideArea} />
                         </div>
                       </TableCell>
                       <TableCell><Badge variant="outline">{v.serviceType}</Badge></TableCell>
@@ -714,6 +735,7 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
                           <div className="flex items-center gap-2">
                             <MapPin className="w-4 h-4 text-gray-400" />
                             <span className="text-sm max-w-xs truncate">{p.address || "—"}</span>
+                            <MapPinLink pin={p.location} outsideArea={(p as any).outsideArea} />
                           </div>
                         </TableCell>
                         <TableCell>
@@ -738,6 +760,9 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
               )}
             </CardContent>
           </Card>
+        </TabsContent>
+        <TabsContent value="performance">
+          <CollectorPerformance collectors={collectors} jobs={[...pickups, ...visits]} />
         </TabsContent>
       </Tabs>
 

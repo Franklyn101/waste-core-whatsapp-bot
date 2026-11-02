@@ -34,15 +34,17 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
-import { AlertCircle, KeyRound, Trash2, UserPlus } from "lucide-react"
+import { AlertCircle, KeyRound, ShieldCheck, Trash2, UserPlus } from "lucide-react"
 import { db } from "@/lib/firebase"
 import { useAdminAuth } from "@/lib/admin-auth"
+import { PERMISSIONS, type Permission } from "@/lib/permissions"
 
 interface SubAdmin {
   uid: string
   username: string
   active: boolean
   createdAt: string
+  permissions: Record<string, boolean>
 }
 
 type DialogState =
@@ -62,6 +64,23 @@ export function SubAdminsManager() {
   const [formError, setFormError] = useState<string | null>(null)
   const [isSaving, setIsSaving] = useState(false)
   const [deleting, setDeleting] = useState<SubAdmin | null>(null)
+  const [editingPerms, setEditingPerms] = useState<SubAdmin | null>(null)
+  const [perms, setPerms] = useState<Record<string, boolean>>({})
+
+  const openPermissions = (admin: SubAdmin) => {
+    setPerms(Object.fromEntries(PERMISSIONS.map((p) => [p.id, admin.permissions[p.id] ?? p.subDefault])))
+    setFormError(null)
+    setEditingPerms(admin)
+  }
+
+  const savePermissions = async () => {
+    if (!editingPerms) return
+    setIsSaving(true)
+    const err = await callApi(`/api/sub-admins/${editingPerms.uid}`, "PATCH", { permissions: perms })
+    setIsSaving(false)
+    if (err) return setFormError(err)
+    setEditingPerms(null)
+  }
 
   useEffect(() => {
     const q = query(collection(db, "admins"), where("role", "==", "sub"))
@@ -75,6 +94,7 @@ export function SubAdminsManager() {
               username: d.data().username ?? "",
               active: d.data().active !== false,
               createdAt: d.data().createdAt ?? "",
+              permissions: d.data().permissions ?? {},
             }))
             .sort((a, b) => a.username.localeCompare(b.username))
         )
@@ -188,7 +208,10 @@ export function SubAdminsManager() {
                         />
                       </TableCell>
                       <TableCell>
-                        <div className="flex gap-2">
+                        <div className="flex flex-wrap gap-2">
+                          <Button variant="outline" size="sm" onClick={() => openPermissions(a)}>
+                            <ShieldCheck className="mr-1 h-4 w-4" /> Permissions
+                          </Button>
                           <Button variant="outline" size="sm" onClick={() => openDialog({ kind: "password", admin: a })}>
                             <KeyRound className="mr-1 h-4 w-4" /> Reset password
                           </Button>
@@ -220,7 +243,7 @@ export function SubAdminsManager() {
             <DialogDescription>
               {dialog?.kind === "password"
                 ? "They will be signed out and must use the new password."
-                : "Share the username and password with the staff member. They can use every section except Sub-admins."}
+                : "Share the username and password with the staff member. They can manage pickups, collectors, subscribers and tickets; give extra access with Permissions."}
             </DialogDescription>
           </DialogHeader>
           <form className="space-y-4" onSubmit={handleSave}>
@@ -259,6 +282,38 @@ export function SubAdminsManager() {
               </Button>
             </DialogFooter>
           </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!editingPerms} onOpenChange={(open) => { if (!open) setEditingPerms(null) }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Permissions for {editingPerms?.username}</DialogTitle>
+            <DialogDescription>
+              Sub-admins can always manage pickups, collectors, subscribers and tickets. Turn on extra access below.
+              Changes apply immediately.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            {PERMISSIONS.map((p) => (
+              <label key={p.id} className="flex items-start justify-between gap-4 rounded-lg border p-3">
+                <span>
+                  <span className="block text-sm font-medium">{p.label}</span>
+                  <span className="block text-xs text-muted-foreground">{p.description}</span>
+                </span>
+                <Switch
+                  checked={perms[p.id] ?? false}
+                  onCheckedChange={(v) => setPerms((cur) => ({ ...cur, [p.id as Permission]: v }))}
+                  aria-label={p.label}
+                />
+              </label>
+            ))}
+          </div>
+          {formError && <p className="text-sm text-destructive">{formError}</p>}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditingPerms(null)}>Cancel</Button>
+            <Button onClick={savePermissions} disabled={isSaving}>{isSaving ? "Saving..." : "Save permissions"}</Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 

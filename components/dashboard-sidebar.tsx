@@ -4,7 +4,9 @@ import { useState } from "react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
-import { LayoutDashboard, Truck, Ticket, Rocket, Trash, Zap, Users, Receipt, BarChart3, Menu, X, HardHat, UserCog, CalendarClock } from "lucide-react"
+import { LayoutDashboard, Truck, Ticket, Rocket, Trash, Zap, Users, Receipt, BarChart3, Menu, X, HardHat, UserCog, CalendarClock, Banknote, History, Megaphone } from "lucide-react"
+import { useAdminAuth } from "@/lib/admin-auth"
+import { can, type Permission } from "@/lib/permissions"
 
 interface SidebarProps {
   activeSection: string
@@ -47,7 +49,7 @@ const navigationItems = [
   },
   {
     id: "users",
-    label: "User Data",
+    label: "Customers",
     icon: Users,
   },
   {
@@ -70,10 +72,27 @@ const navigationItems = [
     label: "Service Analytics",
     icon: BarChart3,
   },
+  {
+    id: "reports",
+    label: "Revenue Reports",
+    icon: Banknote,
+    permission: "viewRevenue" as Permission,
+  },
+  {
+    id: "broadcasts",
+    label: "Broadcasts",
+    icon: Megaphone,
+    permission: "sendBroadcasts" as Permission,
+  },
 ]
 
 // Shown only to the main admin.
 const mainAdminItems = [
+  {
+    id: "activity",
+    label: "Activity Log",
+    icon: History,
+  },
   {
     id: "sub-admins",
     label: "Sub-admins",
@@ -89,7 +108,11 @@ export function DashboardSidebar({
   onMobileOpenChange,
 }: SidebarProps) {
   const [isCollapsed, setIsCollapsed] = useState(false)
-  const items = [...navigationItems, ...(isMainAdmin ? mainAdminItems : [])]
+  const { profile } = useAdminAuth()
+  const items = [
+    ...navigationItems.filter((item) => !("permission" in item) || can(profile, item.permission as Permission)),
+    ...(isMainAdmin ? mainAdminItems : []),
+  ]
 
   // On phones, picking a page also closes the drawer.
   const selectFromDrawer = (section: string) => {

@@ -32,6 +32,7 @@ import { AdvancedFilters, type FilterOptions } from "@/components/advanced-filte
 import { useFilteredRequests } from "@/hooks/use-filtered-data"
 import { FirebaseService } from "@/lib/firebase-service"
 import type { WasteRequest } from "@/lib/types"
+import { MapPinLink } from "@/components/map-pin-link"
 
 interface InstantPickupTableProps {
   searchQuery?: string
@@ -191,6 +192,7 @@ export function InstantPickupTable({ searchQuery = "" }: InstantPickupTableProps
                     <div className="flex items-center gap-2">
                       <MapPin className="w-4 h-4 text-gray-400" />
                       <span className="text-sm max-w-xs truncate">{request.address}</span>
+                      <MapPinLink pin={(request as any).location} outsideArea={(request as any).outsideArea} />
                     </div>
                   </TableCell>
                   <TableCell>
