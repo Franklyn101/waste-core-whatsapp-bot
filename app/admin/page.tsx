@@ -24,6 +24,7 @@ import { RevenueReports } from "@/components/revenue-reports"
 import { ActivityLog } from "@/components/activity-log"
 import { CustomersManager } from "@/components/customers-manager"
 import { BroadcastsManager } from "@/components/broadcasts-manager"
+import { BackupsManager } from "@/components/backups-manager"
 import { can } from "@/lib/permissions"
 
 
@@ -233,6 +234,17 @@ function DashboardPage() {
               <p className="text-muted-foreground mt-2">Send an announcement to a group of customers on WhatsApp: holidays, schedule changes, offers.</p>
             </div>
             <BroadcastsManager />
+          </div>
+        )
+      case "backups":
+        if (!isMainAdmin) return <div>Only the main admin can manage backups.</div>
+        return (
+          <div className="space-y-6">
+            <div>
+              <h1 className="text-2xl md:text-3xl font-bold text-balance">Backups</h1>
+              <p className="text-muted-foreground mt-2">Nightly copies of the whole database, so nothing is lost if something goes wrong.</p>
+            </div>
+            <BackupsManager />
           </div>
         )
       case "activity":
