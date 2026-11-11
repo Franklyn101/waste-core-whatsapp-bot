@@ -33,6 +33,7 @@ import { useFilteredRequests } from "@/hooks/use-filtered-data"
 import { FirebaseService } from "@/lib/firebase-service"
 import type { WasteRequest } from "@/lib/types"
 import { MapPinLink } from "@/components/map-pin-link"
+import { ProofPhoto } from "@/components/proof-photo"
 
 // Maps serviceType stored in Firestore to a human-readable label
 const SERVICE_LABELS: Record<string, string> = {
@@ -250,6 +251,7 @@ export function PickupRequestsTable({ searchQuery = "" }: PickupRequestsTablePro
                   </TableCell>
                   <TableCell>
                     <Badge className={getStatusBadge(request.status)}>{request.status}</Badge>
+                    <ProofPhoto report={(request as any).collectorReport} compact />
                   </TableCell>
                   <TableCell>
                     {request.paymentReceiptUrl ? (

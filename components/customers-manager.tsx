@@ -16,7 +16,8 @@ import { loadRevenue, METHOD_LABELS, type RevenueEntry } from "@/lib/revenue"
 import { findPlan, planFullLabel } from "@/lib/subscriptions"
 import { useAdminAuth } from "@/lib/admin-auth"
 import { can } from "@/lib/permissions"
-import type { GeoPin } from "@/lib/types"
+import type { CollectorReport, GeoPin } from "@/lib/types"
+import { ProofPhoto } from "@/components/proof-photo"
 
 // Numbers are stored in several shapes (whatsapp:+234..., 0803...); this is
 // the one key a customer is grouped by: international digits, no "+".
@@ -47,6 +48,7 @@ interface HistoryItem {
   amount: number | null
   rating: number | null
   ratingComment: string
+  proof: CollectorReport | null
 }
 
 interface Customer {
@@ -117,6 +119,7 @@ async function loadCustomers(): Promise<Customer[]> {
         amount: Number(data.totalAmount) || null,
         rating: data.rating?.stars ?? null,
         ratingComment: data.rating?.comment ?? "",
+        proof: data.collectorReport?.photoUrl ? data.collectorReport : null,
       })
     }
   })
@@ -305,6 +308,7 @@ export function CustomersManager({ searchQuery = "" }: { searchQuery?: string })
                           {i.rating != null && <span className="text-xs text-amber-600">{"★".repeat(i.rating)}{"☆".repeat(5 - i.rating)}</span>}
                         </div>
                         {i.ratingComment && <div className="mt-1 text-xs italic text-muted-foreground">“{i.ratingComment}”</div>}
+                        <ProofPhoto report={i.proof} compact />
                       </li>
                     ))}
                   </ul>

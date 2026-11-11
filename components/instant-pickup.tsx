@@ -33,6 +33,7 @@ import { useFilteredRequests } from "@/hooks/use-filtered-data"
 import { FirebaseService } from "@/lib/firebase-service"
 import type { WasteRequest } from "@/lib/types"
 import { MapPinLink } from "@/components/map-pin-link"
+import { ProofPhoto } from "@/components/proof-photo"
 
 interface InstantPickupTableProps {
   searchQuery?: string
@@ -227,6 +228,7 @@ export function InstantPickupTable({ searchQuery = "" }: InstantPickupTableProps
                   </TableCell>
                   <TableCell>
                     <Badge className={getStatusBadge(request.status)}>{request.status}</Badge>
+                    <ProofPhoto report={(request as any).collectorReport} compact />
                   </TableCell>
                   <TableCell>
                     {request.paymentReceiptUrl ? (
