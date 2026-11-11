@@ -4,7 +4,7 @@ import { useState } from "react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
-import { LayoutDashboard, Truck, Ticket, Rocket, Trash, Zap, Users, Receipt, BarChart3, Menu, X, HardHat, UserCog, CalendarClock, Banknote, History, Megaphone } from "lucide-react"
+import { LayoutDashboard, Truck, Ticket, Rocket, Trash, Zap, Users, Receipt, BarChart3, Menu, X, HardHat, UserCog, CalendarClock, Banknote, History, Megaphone, DatabaseBackup } from "lucide-react"
 import { useAdminAuth } from "@/lib/admin-auth"
 import { can, type Permission } from "@/lib/permissions"
 
@@ -92,6 +92,11 @@ const mainAdminItems = [
     id: "activity",
     label: "Activity Log",
     icon: History,
+  },
+  {
+    id: "backups",
+    label: "Backups",
+    icon: DatabaseBackup,
   },
   {
     id: "sub-admins",

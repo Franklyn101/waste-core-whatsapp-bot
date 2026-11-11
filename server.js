@@ -9,6 +9,7 @@ const axios = require("axios")
 const crypto = require("crypto")
 const webpush = require("web-push")
 const PDFDocument = require("pdfkit")
+const zlib = require("zlib")
 
 // ================= NEXT.JS =================
 const dev = process.env.NODE_ENV !== "production"
@@ -861,6 +862,8 @@ function setupCollectorSummaries() {
     sendAdminDigest().catch((err) => console.error("Admin digest failed:", err))
     sendAutomaticRenewalReminders().catch((err) => console.error("Automatic renewal reminders failed:", err))
     sendPickupReminders().catch((err) => console.error("Pickup reminders failed:", err))
+    oncePerDay("dailyBackup", BACKUP_HOUR, BACKUP_HOUR + 4, () => runBackup("scheduled"))
+      .catch((err) => console.error("Daily backup failed:", err))
   }
   run()
   setInterval(run, 10 * 60 * 1000).unref()
@@ -1019,6 +1022,76 @@ async function sendAdminDigest() {
     title: "Subscriptions to renew",
     body: [expired && `${expired} expired`, expiring && `${expiring} expiring this week`].filter(Boolean).join(", ") + ". Send renewal reminders from Subscriptions.",
   })
+}
+
+// ================= DAILY BACKUPS =================
+// Every night (BACKUP_HOUR, Nigerian time) the whole database is saved as
+// one gzipped JSON file in Cloudinary, uploaded as a *private* raw file so
+// it can only be downloaded with a signed, short-lived link. The last
+// BACKUP_KEEP_DAYS are kept; backups/{date} records each one. The main
+// admin can download or start one from the dashboard's Backups page, and
+// scripts/restore-backup.js puts a backup back.
+const BACKUP_HOUR = Number(process.env.BACKUP_HOUR || 2)
+const BACKUP_KEEP_DAYS = Number(process.env.BACKUP_KEEP_DAYS || 30)
+const BACKUP_FOLDER = "waste-connect/backups"
+// Not worth backing up: duplicate-message markers and base64 image copies.
+const BACKUP_SKIP = new Set(["processedMessages", "imageFallbacks"])
+
+// Firestore values that JSON can't hold are tagged so the restore script
+// can turn them back: timestamps as { __timestamp: ISO }.
+function backupValue(value) {
+  if (value === null || typeof value !== "object") return value
+  if (typeof value.toDate === "function") return { __timestamp: value.toDate().toISOString() }
+  if (Array.isArray(value)) return value.map(backupValue)
+  return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, backupValue(v)]))
+}
+
+async function runBackup(trigger) {
+  const date = lagosToday()
+  const started = Date.now()
+  try {
+    const collections = (await db.listCollections()).map((c) => c.id).filter((id) => !BACKUP_SKIP.has(id)).sort()
+    const data = {}
+    const counts = {}
+    for (const name of collections) {
+      const snap = await db.collection(name).get()
+      data[name] = Object.fromEntries(snap.docs.map((d) => [d.id, backupValue(d.data())]))
+      counts[name] = snap.docs.length
+    }
+    const json = JSON.stringify({ app: "WasteCore", createdAt: new Date().toISOString(), collections: data })
+    const gz = zlib.gzipSync(Buffer.from(json))
+    const publicId = `${BACKUP_FOLDER}/backup-${date}.json.gz`
+    await new Promise((resolve, reject) => {
+      cloudinary.uploader.upload_stream(
+        { resource_type: "raw", type: "private", public_id: publicId, overwrite: true, invalidate: true },
+        (error, result) => (error ? reject(error) : resolve(result))
+      ).end(gz)
+    })
+    const docs = Object.values(counts).reduce((a, b) => a + b, 0)
+    await db.collection("backups").doc(date).set({
+      date, publicId, bytes: gz.length, docs, counts, trigger, status: "ok",
+      seconds: Math.round((Date.now() - started) / 1000), createdAt: new Date().toISOString(),
+    })
+    console.log(`Backup ${date}: ${docs} documents in ${collections.length} collections, ${Math.round(gz.length / 1024)} KB`)
+    await pruneBackups()
+    return { ok: true, date, docs, bytes: gz.length }
+  } catch (err) {
+    console.error("Backup failed:", err.message || err)
+    await db.collection("backups").doc(date).set({ date, status: "failed", error: String(err.message || err).slice(0, 300), trigger, createdAt: new Date().toISOString() }, { merge: true }).catch(() => {})
+    await notifyAdmins({ key: `backup_failed_${date}_${trigger}`, type: "support", section: "backups", title: "Database backup failed", body: `${String(err.message || err).slice(0, 150)}. Try "Back up now" on the Backups page.` })
+    return { ok: false, error: String(err.message || err) }
+  }
+}
+
+async function pruneBackups() {
+  const cutoff = addDays(lagosToday(), -BACKUP_KEEP_DAYS)
+  const old = await db.collection("backups").where("date", "<", cutoff).get()
+  for (const d of old.docs) {
+    if (d.data().publicId) {
+      await cloudinary.uploader.destroy(d.data().publicId, { resource_type: "raw", type: "private", invalidate: true }).catch(() => {})
+    }
+    await d.ref.delete()
+  }
 }
 
 // ================= RECEIPTS =================
@@ -3653,7 +3726,7 @@ nextApp.prepare().then(() => {
     const cutoff = Date.now() - 15 * 60 * 1000
     for (const [ip, times] of attempts) if (times.every((t) => t < cutoff)) attempts.delete(ip)
   }, 15 * 60 * 1000).unref()
-  app.use(["/api/admin-auth/setup", "/api/sub-admins", "/api/push", "/api/broadcasts"], rateLimit)
+  app.use(["/api/admin-auth/setup", "/api/sub-admins", "/api/push", "/api/broadcasts", "/api/backups"], rateLimit)
 
   const ADMIN_EMAIL_DOMAIN = "admins.wastecore.local"
   const USERNAME_RE = /^[a-z0-9._-]{3,30}$/
@@ -3778,6 +3851,34 @@ nextApp.prepare().then(() => {
     if (data.role === "main" || data.permissions?.[permission] === true) return next()
     res.status(403).json({ error: "You don't have permission to do this. Ask the main admin." })
   }
+
+  // ── Backups (main admin only) ─────────────────────────────────────────────
+  app.get("/api/backups", requireMainAdmin, async (req, res) => {
+    const snap = await db.collection("backups").get()
+    const list = snap.docs.map((d) => {
+      const { publicId, ...rest } = d.data()
+      return rest
+    }).sort((a, b) => String(b.date).localeCompare(String(a.date)))
+    res.json({ backups: list, keepDays: BACKUP_KEEP_DAYS, hour: BACKUP_HOUR })
+  })
+
+  app.post("/api/backups", requireMainAdmin, async (req, res) => {
+    const result = await runBackup("manual")
+    await logAdminActivity(req.adminUid, "Ran a database backup", { status: result.ok ? "ok" : "failed" })
+    res.status(result.ok ? 200 : 500).json(result)
+  })
+
+  // A signed download link that works for 5 minutes.
+  app.post("/api/backups/:date/link", requireMainAdmin, async (req, res) => {
+    const snap = await db.collection("backups").doc(String(req.params.date)).get()
+    const publicId = snap.data()?.publicId
+    if (!publicId) return res.status(404).json({ error: "Backup not found." })
+    const url = cloudinary.utils.private_download_url(publicId, "", {
+      resource_type: "raw", type: "private", expires_at: Math.floor(Date.now() / 1000) + 300, attachment: true,
+    })
+    await logAdminActivity(req.adminUid, "Downloaded a database backup", { target: req.params.date })
+    res.json({ url })
+  })
 
   // ── Broadcasts ────────────────────────────────────────────────────────────
   // { audience, message, preview } -> { count } (preview) or { id, count }.
