@@ -52,7 +52,6 @@ import {
   Calendar,
   CheckCircle2,
   ClipboardList,
-  Image as ImageIcon,
   MapPin,
   MessageCircle,
   MoreHorizontal,
@@ -65,6 +64,7 @@ import {
 } from "lucide-react"
 import { FirebaseService } from "@/lib/firebase-service"
 import { CollectorPerformance } from "@/components/collector-performance"
+import { ProofPhoto } from "@/components/proof-photo"
 import { useAdminAuth } from "@/lib/admin-auth"
 import { can } from "@/lib/permissions"
 import { WEEK_DAYS, findPlan, planFullLabel } from "@/lib/subscriptions"
@@ -407,7 +407,6 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
 
   const statusCell = (p: CollectorPickup) => {
     const report = p.collectorReport
-    const photo = report?.photoUrl && !report.photoUrl.startsWith("firebase:") ? report.photoUrl : null
     return (
       <div className="flex flex-col items-start gap-1">
         <Select value={p.status} onValueChange={(v) => handleStatus(p, v as PickupStatus)}>
@@ -427,6 +426,7 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
             {"★".repeat(p.rating.stars)}{"☆".repeat(5 - p.rating.stars)} customer rating
           </span>
         )}
+        {report && !isOpen(p) && <ProofPhoto report={report} compact />}
         {report && isOpen(p) && (
           <div className="max-w-44 text-[11px]">
             {report.status === "done" ? (
@@ -437,12 +437,7 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
             <div className="text-muted-foreground">
               {report.collectorName ? `${report.collectorName} · ` : ""}{reportTime(report.at)}
             </div>
-            {photo && (
-              <a href={photo} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-green-700 hover:underline">
-                <ImageIcon className="h-3 w-3" /> View photo
-              </a>
-            )}
-            {report.photoUrl?.startsWith("firebase:") && <div className="text-muted-foreground">Photo saved as backup copy</div>}
+            <ProofPhoto report={report} />
             <div className="mt-1 flex flex-wrap gap-1">
               {report.status === "done" ? (
                 <Button size="sm" className="h-7 px-2 text-xs" onClick={() => handleStatus(p, "completed")}>

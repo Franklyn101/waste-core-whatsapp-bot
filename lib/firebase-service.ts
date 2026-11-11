@@ -103,6 +103,7 @@ function normalizeRequest(data: any, id: string): WasteRequest {
     location:          data.location ?? null,
     outsideArea:       data.outsideArea === true,
     rating:            data.rating ?? null,
+    collectorReport:   data.collectorReport ?? null,
     createdAt,
     updatedAt,
   }
