@@ -688,7 +688,7 @@ async function loadCollector(collectorId) {
 // Collector whose WhatsApp number sent a message, if any (cached briefly).
 let collectorCache = { at: 0, list: [] }
 async function findCollectorByPhone(from) {
-  if (Date.now() - collectorCache.at > 5 * 60 * 1000) {
+  if (Date.now() - collectorCache.at > 60 * 1000) {
     const snap = await db.collection("collectors").get()
     collectorCache = { at: Date.now(), list: snap.docs.map((d) => ({ id: d.id, ...d.data() })) }
   }
@@ -2295,6 +2295,7 @@ nextApp.prepare().then(() => {
       const messageId = message.id || null
       // `msg` is lowercased for matching commands and menu choices; `rawMsg`
       // keeps what the customer typed for names, addresses and descriptions.
+      const caption = String(message.image?.caption || message.document?.caption || "").trim().substring(0, 500)
       const phoneNumberId = value?.metadata?.phone_number_id || null
       const displayNumber = value?.metadata?.display_phone_number || null
       // A tapped button or list row: match on its id (the menu number).
@@ -2303,7 +2304,7 @@ nextApp.prepare().then(() => {
         : ""
       return {
         from: from, msg: (replyId || text).toLowerCase().substring(0, 500), rawMsg: text,
-        hasImage, mediaId, mediaType, unsupportedMedia, messageId, phoneNumberId, displayNumber, location,
+        hasImage, mediaId, mediaType, unsupportedMedia, messageId, phoneNumberId, displayNumber, location, caption,
       }
     } catch (e) {
       console.error("extractIncoming error:", e)
@@ -2470,95 +2471,168 @@ nextApp.prepare().then(() => {
       WEEKLY_PLAN_LABELS[d.serviceType] || (b.collection === "upgradeRequests" ? "Monthly subscription" : "Pickup")
   }
 
-  // ── Collector commands ────────────────────────────────────────────────────
-  function collectorCommand(msg, hasImage) {
-    if (/^(my\s+)?(jobs?|pickups?)[\s.!?]*$/.test(msg)) return "jobs"
-    if (/^(done|completed?|picked(\s+up)?)\s*(job\s*)?#?\s*\d+/.test(msg)) return "done"
-    if (/^(failed|fail|missed|not\s+done|couldn'?t(\s+pick(\s+up)?)?)\s*(job\s*)?#?\s*\d+/.test(msg)) return "failed"
-    if (/^skip[\s.!]*$/.test(msg)) return "skip"
-    if (hasImage) return "photo"
-    return null
-  }
+  // ── Collectors ─────────────────────────────────────────────────────────────
+  // Messages from a registered collector's number are always handled here:
+  //   JOBS                         their numbered job list
+  //   DONE 2 / "job done"          report done (asks which job if unclear)
+  //   FAILED 2 gate locked / "couldn't pick up, nobody home"   report failed
+  //   a photo (caption optional)   proof; reports done if it's clear which job
+  //   SKIP                         no proof photo
+  //   anything else                their jobs and how to report
+  // BOOK switches them to the customer menu for 30 minutes.
+  const COLLECTOR_DONE_RE = /\b(done|finish(ed)?|complete(d)?|picked(\s+it)?(\s+up)?|collected|cleared|carried)\b/
+  const COLLECTOR_FAILED_RE = /\b(fail(ed)?|missed|couldn'?t|could\s+not|cannot|can'?t|not\s+done|unable|no\s*one|nobody|locked|not\s+(at\s+)?home|not\s+available)\b/
+  const COLLECTOR_JOBS_RE = /^(my\s+)?(jobs?|pickups?|list)[\s.!?]*$/
+  const CUSTOMER_MODE_MS = 30 * 60 * 1000
+  const stillValid = (item) => item && Date.parse(item.until) > Date.now() ? item : null
 
-  // Returns true when the message was a collector command (and was answered);
-  // false lets it continue as a normal customer message.
-  async function handleCollectorCommand(collector, command, { from, msg, rawMsg, mediaId, mediaType }) {
+  // Returns false only when the collector asked to use the customer menu.
+  async function handleCollectorMessage(collector, { from, msg, rawMsg, caption, hasImage, mediaId, mediaType }) {
     const reply = (text) => sendWhatsAppMessage(from, text)
     const listRef = db.collection("collectorJobLists").doc(collector.id)
-    const now = new Date().toISOString()
+    const state = (await listRef.get()).data() || {}
+    const text = (msg || caption.toLowerCase()).trim()
+    const typed = (rawMsg || caption).trim()
 
-    if (command === "jobs") {
+    // Booking a pickup for themselves.
+    if (/^(book|customer|menu)\b/.test(text)) {
+      await listRef.set({ customerModeUntil: new Date(Date.now() + CUSTOMER_MODE_MS).toISOString() }, { merge: true })
+      return false
+    }
+    if (stillValid({ until: state.customerModeUntil }) && !COLLECTOR_JOBS_RE.test(text) && !/^(done|failed)\s*#?\s*\d+/.test(text)) {
+      return false
+    }
+
+    if (COLLECTOR_JOBS_RE.test(text)) {
       await reply(await collectorJobsMessage(collector))
       return true
     }
 
-    if (command === "done" || command === "failed") {
-      const n = Number(msg.match(/\d+/)[0])
-      const job = await collectorJob(collector, n)
-      if (job.error) { await reply(job.error); return true }
-      const who = job.data.customerName || "the customer"
-      if (command === "done") {
-        await job.ref.update({
-          collectorReport: { status: "done", at: now, collectorId: collector.id, collectorName: collector.name || "", photoUrl: null },
-          updatedAt: now,
-        })
-        // The next photo they send in the hour is the proof for this job.
-        await listRef.set({ awaitingPhoto: { ...job.entry, until: new Date(Date.now() + 60 * 60 * 1000).toISOString() } }, { merge: true })
-        await notifyAdmins({
-          key: `report_${job.entry.collection}_${job.entry.id}_${now}`,
-          type: "collector",
-          section: "collectors",
-          title: `${collector.name || "A collector"} reported a pickup done`,
-          body: `${who}${job.data.address ? ` · ${job.data.address}` : ""}. Confirm it on the Collectors page.`,
-        })
-        await reply(
-          `\u2705 Thanks! Job ${n} (${who}) is reported as done.\n\n` +
-          `\u{1F4F8} Send a photo of the collected waste as proof, or reply *SKIP*.`
-        )
-      } else {
-        // Reason: whatever follows the job number, as typed.
-        const reason = rawMsg.replace(/^[^\d]*\d+\s*[-:,.]?\s*/, "").trim().slice(0, 200) || "No reason given"
-        await job.ref.update({
-          collectorReport: { status: "failed", at: now, reason, collectorId: collector.id, collectorName: collector.name || "" },
-          updatedAt: now,
-        })
-        await notifyAdmins({
-          key: `report_${job.entry.collection}_${job.entry.id}_${now}`,
-          type: "collector",
-          section: "collectors",
-          title: `${collector.name || "A collector"} couldn't pick up`,
-          body: `${who} · ${reason}`,
-        })
-        await reply(`\u274C Noted: job ${n} (${who}) couldn't be picked up${reason !== "No reason given" ? ` (${reason})` : ""}. The admin will follow up.`)
-      }
-      return true
-    }
-
-    // A photo or SKIP only counts after DONE; otherwise it's a normal message.
-    const awaiting = (await listRef.get()).data()?.awaitingPhoto
-    if (!awaiting || Date.parse(awaiting.until) < Date.now()) return false
-    const jobRef = db.collection(awaiting.collection).doc(awaiting.id)
-    if (command === "skip") {
+    // Proof photo, or SKIP, right after a DONE report.
+    const awaiting = stillValid(state.awaitingPhoto)
+    if (awaiting && /^skip[\s.!]*$/.test(text)) {
       await listRef.set({ awaitingPhoto: null }, { merge: true })
       await reply("OK, no photo. The admin will confirm the pickup.")
       return true
     }
-    const photoUrl = await handleReceiptUpload(mediaId, from, mediaType, "proof")
-    if (!photoUrl) {
-      await reply("Sorry, the photo didn't save. Please send it again, or reply *SKIP*.")
+    if (awaiting && hasImage && !/\d/.test(text) && !COLLECTOR_FAILED_RE.test(text)) {
+      const photoUrl = await handleReceiptUpload(mediaId, from, mediaType, "proof")
+      if (!photoUrl) { await reply("Sorry, the photo didn't save. Please send it again, or reply *SKIP*."); return true }
+      await attachProofPhoto(awaiting, photoUrl)
+      await listRef.set({ awaitingPhoto: null }, { merge: true })
+      await reply("\u{1F4F8} Photo saved. The admin will confirm the pickup.")
       return true
     }
-    const jobSnap = await jobRef.get()
-    if (jobSnap.exists) {
-      await jobRef.update({ collectorReport: { ...(jobSnap.data().collectorReport || {}), photoUrl }, updatedAt: now })
+
+    // A job number answering "which job?".
+    const pending = stillValid(state.pendingChoice)
+    if (pending && /^(job\s*)?#?\s*\d{1,2}[\s.!]*$/.test(text)) {
+      await listRef.set({ pendingChoice: null }, { merge: true })
+      await reportJob(collector, Number(text.match(/\d+/)[0]), pending.action, { photoUrl: pending.photoUrl, reason: pending.reason, from })
+      return true
     }
-    await listRef.set({ awaitingPhoto: null }, { merge: true })
-    await reply("\u{1F4F8} Photo saved. The admin will confirm the pickup.")
+
+    const isFailed = COLLECTOR_FAILED_RE.test(text)
+    const isDone = !isFailed && COLLECTOR_DONE_RE.test(text)
+    if (!isFailed && !isDone && !hasImage) {
+      await reply(
+        `Hi ${collector.name || ""} \u{1F44B} You're registered as a WasteCore collector.\n\n` +
+        `${await collectorJobsMessage(collector)}\n\nTo book a pickup for yourself, reply *BOOK*.`
+      )
+      return true
+    }
+
+    const action = isFailed ? "failed" : "done"
+    const reason = isFailed
+      ? typed.replace(/^\s*(failed|fail|missed)\b\s*/i, "").replace(/^(job\s*)?#?\s*\d{1,2}\b\s*[-:,.]?\s*/i, "").trim().slice(0, 200) || typed.slice(0, 200)
+      : null
+    let photoUrl = null
+    if (hasImage) {
+      photoUrl = await handleReceiptUpload(mediaId, from, mediaType, "proof")
+      if (!photoUrl) { await reply("Sorry, the photo didn't save. Please send it again."); return true }
+    }
+
+    const number = text.match(/\b(\d{1,2})\b/)
+    if (number) {
+      await reportJob(collector, Number(number[1]), action, { photoUrl, reason, from })
+      return true
+    }
+
+    // No job number: use today's only open job, or ask which one.
+    const open = ((await jobsByCollector([lagosToday()])).get(collector.id) || []).filter((j) => !j.collectorReport)
+    if (!open.length) {
+      await reply(`You have no open pickups today${photoUrl ? ", so the photo wasn't added to a job" : ""}. Reply *JOBS* to see your list.`)
+      return true
+    }
+    const listText = await collectorJobsMessage(collector) // also saves the numbering
+    if (open.length === 1) {
+      const list = (await listRef.get()).data()?.jobs || []
+      const n = list.findIndex((e) => e.id === open[0]._ref.id) + 1
+      if (n > 0) {
+        await reportJob(collector, n, action, { photoUrl, reason, from })
+        return true
+      }
+    }
+    await listRef.set({ pendingChoice: { action, photoUrl, reason, until: new Date(Date.now() + CUSTOMER_MODE_MS).toISOString() } }, { merge: true })
+    await reply(
+      `${action === "failed" ? "Which job couldn't you pick up?" : photoUrl ? "\u{1F4F8} Got the photo. Which job is it for?" : "Which job is done?"} ` +
+      `Reply with the job number.\n\n${listText}`
+    )
     return true
   }
 
+  async function attachProofPhoto(entry, photoUrl) {
+    const ref = db.collection(entry.collection).doc(entry.id)
+    const snap = await ref.get()
+    if (snap.exists) await ref.update({ collectorReport: { ...(snap.data().collectorReport || {}), photoUrl }, updatedAt: new Date().toISOString() })
+  }
+
+  // Records a collector's report on job number `n` of their list.
+  async function reportJob(collector, n, action, { photoUrl, reason, from }) {
+    const reply = (text) => sendWhatsAppMessage(from, text)
+    const job = await collectorJob(collector, n)
+    if (job.error) { await reply(job.error); return }
+    const now = new Date().toISOString()
+    const who = job.data.customerName || "the customer"
+    if (action === "done") {
+      await job.ref.update({
+        collectorReport: { status: "done", at: now, collectorId: collector.id, collectorName: collector.name || "", photoUrl: photoUrl || null },
+        updatedAt: now,
+      })
+      await notifyAdmins({
+        key: `report_${job.entry.collection}_${job.entry.id}_${now}`,
+        type: "collector",
+        section: "collectors",
+        title: `${collector.name || "A collector"} reported a pickup done`,
+        body: `${who}${job.data.address ? ` \u00B7 ${job.data.address}` : ""}${photoUrl ? " (with photo)" : ""}. Confirm it on the Collectors page.`,
+      })
+      if (photoUrl) {
+        await reply(`\u2705 Thanks! Job ${n} (${who}) is reported as done, with your photo. The admin will confirm it.`)
+      } else {
+        // The next photo they send in the hour is the proof for this job.
+        await db.collection("collectorJobLists").doc(collector.id)
+          .set({ awaitingPhoto: { ...job.entry, until: new Date(Date.now() + 60 * 60 * 1000).toISOString() } }, { merge: true })
+        await reply(`\u2705 Thanks! Job ${n} (${who}) is reported as done.\n\n\u{1F4F8} Send a photo of the collected waste as proof, or reply *SKIP*.`)
+      }
+      return
+    }
+    const why = reason || "No reason given"
+    await job.ref.update({
+      collectorReport: { status: "failed", at: now, reason: why, collectorId: collector.id, collectorName: collector.name || "", photoUrl: photoUrl || null },
+      updatedAt: now,
+    })
+    await notifyAdmins({
+      key: `report_${job.entry.collection}_${job.entry.id}_${now}`,
+      type: "collector",
+      section: "collectors",
+      title: `${collector.name || "A collector"} couldn't pick up`,
+      body: `${who} \u00B7 ${why}`,
+    })
+    await reply(`\u274C Noted: job ${n} (${who}) couldn't be picked up${reason ? ` (${reason})` : ""}. The admin will follow up.`)
+  }
+
   async function handleIncoming({
-    from, msg, rawMsg = "", hasImage, mediaId, mediaType, unsupportedMedia, messageId, phoneNumberId, displayNumber, location,
+    from, msg, rawMsg = "", hasImage, mediaId, mediaType, unsupportedMedia, messageId, phoneNumberId, displayNumber, location, caption = "",
   }) {
     if (displayNumber || phoneNumberId) rememberBusinessNumber(displayNumber, phoneNumberId).catch(() => {})
 
@@ -2589,12 +2663,10 @@ nextApp.prepare().then(() => {
       return
     }
 
-    // Collectors: JOBS, DONE 2, FAILED 2 reason, a proof photo, SKIP.
-    const command = collectorCommand(msg, hasImage)
-    if (command) {
-      const collector = await findCollectorByPhone(from)
-      if (collector && await handleCollectorCommand(collector, command, { from, msg, rawMsg, mediaId, mediaType })) return
-    }
+    // Registered collectors never get the customer flow (unless they ask to
+    // BOOK for themselves): reports, proof photos and questions go here.
+    const collector = await findCollectorByPhone(from)
+    if (collector && await handleCollectorMessage(collector, { from, msg, rawMsg, caption, hasImage, mediaId, mediaType })) return
 
     // GLOBAL CANCEL
     if (CANCEL_RE.test(msg)) {
