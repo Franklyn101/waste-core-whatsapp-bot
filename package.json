@@ -6,7 +6,10 @@
     "build": "next build",
     "dev": "cross-env NODE_ENV=development node server.js",
     "lint": "next lint",
-    "start": "cross-env NODE_ENV=production node server.js"
+    "start": "cross-env NODE_ENV=production node server.js",
+    "test": "node --test tests/*.test.js",
+    "check": "node --check server.js && node --check scripts/restore-backup.js && node --check scripts/check-types.js",
+    "typecheck": "node scripts/check-types.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "latest",

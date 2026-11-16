@@ -1,0 +1,39 @@
+# Runs on every pull request and on pushes to main, so a change that would
+# break the bot or the dashboard is caught before it reaches Railway.
+name: Checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Bot code loads
+        run: npm run check
+
+      - name: Bot tests (WhatsApp, payments, collectors, backups)
+        run: npm test
+
+      - name: No new type errors
+        run: npm run typecheck
+
+      - name: Dashboard builds
+        run: npm run build
