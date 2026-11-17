@@ -42,7 +42,7 @@ function startBot({ seed = {}, env = {} } = {}) {
     get: async () => {
       const docs = Object.entries(store)
         .filter(([k, v]) => k.split("/")[0] === col && filters.every(([f, op, val]) =>
-          op === "==" ? v[f] === val : op === "<" ? v[f] < val : op === "in" ? val.includes(v[f]) : true))
+          op === "==" ? v[f] === val : op === "<" ? v[f] < val : op === ">" ? v[f] > val : op === "in" ? val.includes(v[f]) : true))
         .map(([k, v]) => ({ id: k.split("/")[1], data: () => v, ref: docRef(col, k.split("/")[1]) }))
       return { empty: !docs.length, size: docs.length, docs }
     },

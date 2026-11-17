@@ -862,6 +862,7 @@ function setupCollectorSummaries() {
     sendAdminDigest().catch((err) => console.error("Admin digest failed:", err))
     sendAutomaticRenewalReminders().catch((err) => console.error("Automatic renewal reminders failed:", err))
     sendPickupReminders().catch((err) => console.error("Pickup reminders failed:", err))
+    reconcilePendingPayments().catch((err) => console.error("Payment reconciliation failed:", err))
     oncePerDay("dailyBackup", BACKUP_HOUR, BACKUP_HOUR + 4, () => runBackup("scheduled"))
       .catch((err) => console.error("Daily backup failed:", err))
   }
@@ -2220,6 +2221,35 @@ async function reportUnmatchedPayment(reference, paidKobo, customerPhone) {
     await sendWhatsAppMessage(phone,
       `We received your payment of ${naira(Number(paidKobo) / 100)} (ref ${reference}), but the booking it was for has expired. ` +
       `Our team will contact you shortly to set it up. No need to pay again.`)
+  }
+}
+
+// Safety net: Paystack reports payments by webhook, and the customer's
+// return page checks too. If both are missed (webhook URL not set in
+// Paystack, a delivery lost, the customer closed the page), this asks
+// Paystack about recent unpaid links so no payment is left without its
+// booking. Each link is checked at most every 30 minutes for 2 days.
+async function reconcilePendingPayments() {
+  if (!paystackEnabled()) return
+  const now = Date.now()
+  const since = new Date(now - 2 * 86400000).toISOString()
+  const snap = await db.collection("pendingPayments").where("createdAt", ">", since).get()
+  for (const d of snap.docs) {
+    const p = d.data()
+    if (p.status !== "pending") continue
+    if (now - Date.parse(p.createdAt) < 5 * 60 * 1000) continue // give the webhook a chance
+    if (p.lastCheckedAt && now - Date.parse(p.lastCheckedAt) < 30 * 60 * 1000) continue
+    await d.ref.update({ lastCheckedAt: new Date().toISOString() }).catch(() => {})
+    try {
+      const tx = await verifyPaystackTransaction(d.id)
+      if (tx?.status === "success" && tx.currency === "NGN") {
+        const outcome = await finalizePaystackPayment(d.id, tx.amount, tx.channel, tx.metadata?.customerPhone)
+        console.log(`Paystack ${d.id} found paid by reconciliation: ${outcome}`)
+      }
+    } catch (err) {
+      // Paystack answers 400 for links never opened; nothing to do.
+      if (err.response?.status !== 400) console.error(`Paystack check of ${d.id} failed:`, err.response?.data || err.message)
+    }
   }
 }
 
@@ -3726,7 +3756,9 @@ nextApp.prepare().then(() => {
     const cutoff = Date.now() - 15 * 60 * 1000
     for (const [ip, times] of attempts) if (times.every((t) => t < cutoff)) attempts.delete(ip)
   }, 15 * 60 * 1000).unref()
-  app.use(["/api/admin-auth/setup", "/api/sub-admins", "/api/push", "/api/broadcasts", "/api/backups"], rateLimit)
+  // Also the public payment pages, which call Paystack (not the webhook,
+  // which Paystack signs and may send in bursts).
+  app.use(["/api/admin-auth/setup", "/api/sub-admins", "/api/push", "/api/broadcasts", "/api/backups", "/paystack/callback", "/renew"], rateLimit)
 
   const ADMIN_EMAIL_DOMAIN = "admins.wastecore.local"
   const USERNAME_RE = /^[a-z0-9._-]{3,30}$/
@@ -4039,10 +4071,11 @@ nextApp.prepare().then(() => {
   // Paystack dashboard (Settings > API Keys & Webhooks).
   app.post("/paystack/webhook", async (req, res) => {
     if (!paystackEnabled()) return res.sendStatus(404)
-    const signature = String(req.headers["x-paystack-signature"] || "")
-    const expected = crypto.createHmac("sha512", PAYSTACK_SECRET_KEY).update(req.rawBody || "").digest("hex")
-    const valid = signature.length === expected.length &&
-      crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))
+    // Paystack signs the exact request body with the secret key. Compare
+    // bytes (not characters) so an odd header is rejected, not an error.
+    const signature = Buffer.from(String(req.headers["x-paystack-signature"] || ""), "utf8")
+    const expected = Buffer.from(crypto.createHmac("sha512", PAYSTACK_SECRET_KEY).update(req.rawBody || "").digest("hex"), "utf8")
+    const valid = signature.length === expected.length && crypto.timingSafeEqual(signature, expected)
     if (!valid) {
       console.warn("Paystack webhook with invalid signature ignored")
       return res.sendStatus(401)

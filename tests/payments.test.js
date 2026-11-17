@@ -31,6 +31,7 @@ test("a booking gets a Pay button and is only saved once Paystack confirms", asy
   const ref = pendingRef()
   assert.ok(ref)
   assert.equal((await webhook({ reference: ref, amount: 260000 }, { signature: "forged" })).status, 401)
+  assert.equal((await webhook({ reference: ref, amount: 260000 }, { signature: "é" + "a".repeat(127) })).status, 401, "odd bytes are rejected cleanly")
   assert.equal(bot.all("pickupRequests").length, 0)
 
   assert.equal((await webhook({ reference: ref, amount: 260000 })).status, 200)
