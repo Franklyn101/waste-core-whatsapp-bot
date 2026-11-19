@@ -114,7 +114,16 @@ function startBot({ seed = {}, env = {} } = {}) {
         sent.push(body.message)
         return { data: {} }
       },
-      get: async (url) => {
+      get: async (url, opts) => {
+        if (url.includes("paystack") && url.endsWith("/bank")) {
+          return { data: { data: [{ name: "Guaranty Trust Bank", code: "058", active: true }, { name: "Access Bank", code: "044", active: true }, { name: "Closed Bank", code: "999", active: false }] } }
+        }
+        if (url.includes("paystack") && url.endsWith("/bank/resolve")) {
+          const accounts = { "0123456789:058": "TUNDE BAKARE" }
+          const name = accounts[`${opts?.params?.account_number}:${opts?.params?.bank_code}`]
+          if (!name) { const e = new Error("unresolvable"); e.response = { status: 422 }; throw e }
+          return { data: { data: { account_name: name } } }
+        }
         if (url.includes("paystack")) return { data: { data: global.__paystackVerify || {} } }
         return { data: url.includes("graph.facebook") ? { url: "https://media.test" } : Buffer.from("image-bytes") }
       },

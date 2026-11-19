@@ -181,6 +181,7 @@ function normalizeCollector(data: any, id: string): Collector {
     phone:     data.phone ?? "",
     area:      data.area ?? "",
     active:    data.active ?? true,
+    payout:    data.payout?.accountNumber ? data.payout : null,
     createdAt: parseDate(data.createdAt),
     updatedAt: parseDate(data.updatedAt || data.createdAt),
   }

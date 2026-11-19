@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react"
 import { addDoc, collection, doc, onSnapshot, setDoc } from "firebase/firestore"
-import { Star, Wallet } from "lucide-react"
+import { BadgeCheck, Copy, Star, Wallet } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -125,6 +125,10 @@ export function CollectorPerformance({ collectors, jobs }: Props) {
       await addDoc(collection(db, "collectorPayouts"), {
         collectorId: target.collector.id,
         collectorName: target.collector.name,
+        // The account it was paid into, as it was at the time.
+        paidTo: target.collector.payout
+          ? `${target.collector.payout.bankName} ${target.collector.payout.accountNumber} (${target.collector.payout.accountName})`
+          : null,
         amount,
         note: payNote.trim(),
         paidAt: new Date().toISOString(),
@@ -243,6 +247,34 @@ export function CollectorPerformance({ collectors, jobs }: Props) {
             <DialogDescription>Currently owed: {naira(paying?.owed ?? 0)}</DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
+            {paying?.collector.payout ? (
+              <div className="space-y-1 rounded-lg border bg-muted/40 p-3 text-sm">
+                <div className="text-xs font-medium text-muted-foreground">Pay into</div>
+                {[
+                  ["Bank", paying.collector.payout.bankName],
+                  ["Account number", paying.collector.payout.accountNumber],
+                  ["Account name", paying.collector.payout.accountName],
+                ].map(([label, value]) => (
+                  <div key={label} className="flex items-center justify-between gap-2">
+                    <span className="text-muted-foreground">{label}</span>
+                    <span className="flex items-center gap-1 font-medium">
+                      {value}
+                      <button type="button" className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                        aria-label={`Copy ${label}`} onClick={() => navigator.clipboard?.writeText(value)}>
+                        <Copy className="h-3.5 w-3.5" />
+                      </button>
+                    </span>
+                  </div>
+                ))}
+                {paying.collector.payout.verified
+                  ? <div className="flex items-center gap-1 text-xs text-green-700"><BadgeCheck className="h-3.5 w-3.5" /> Name confirmed by the bank</div>
+                  : <div className="text-xs text-amber-700">Not verified with the bank. Check the name before paying.</div>}
+              </div>
+            ) : (
+              <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+                No payout account saved for {paying?.collector.name}. Add it under Collectors → Edit.
+              </div>
+            )}
             <div className="space-y-2">
               <Label htmlFor="payout-amount">Amount paid (NGN)</Label>
               <Input id="payout-amount" type="number" min={0} inputMode="numeric" value={payAmount} onChange={(e) => setPayAmount(e.target.value)} />

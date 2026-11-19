@@ -49,7 +49,9 @@ import {
 } from "@/components/ui/dropdown-menu"
 import {
   AlertCircle,
+  BadgeCheck,
   BellRing,
+  Landmark,
   Calendar,
   CheckCircle2,
   ClipboardList,
@@ -66,10 +68,11 @@ import {
 import { FirebaseService } from "@/lib/firebase-service"
 import { CollectorPerformance } from "@/components/collector-performance"
 import { ProofPhoto } from "@/components/proof-photo"
+import { logActivity } from "@/lib/activity"
 import { useAdminAuth } from "@/lib/admin-auth"
 import { can } from "@/lib/permissions"
 import { WEEK_DAYS, findPlan, planFullLabel } from "@/lib/subscriptions"
-import type { Collector, CollectorInput, CollectorPickup, PickupStatus, ReminderSettings, SubscriptionRow } from "@/lib/types"
+import type { Collector, CollectorInput, CollectorPickup, PayoutAccount, PickupStatus, ReminderSettings, SubscriptionRow } from "@/lib/types"
 import { Textarea } from "@/components/ui/textarea"
 import { MapPinLink, mapPinUrl } from "@/components/map-pin-link"
 
@@ -103,7 +106,13 @@ const STATUS_BADGE: Record<string, string> = {
   cancelled:  "bg-red-100 text-red-800",
 }
 
-const EMPTY_FORM: CollectorInput = { name: "", phone: "", area: "", active: true }
+const EMPTY_FORM: CollectorInput = { name: "", phone: "", area: "", active: true, payout: null }
+const EMPTY_PAYOUT: PayoutAccount = { bankName: "", bankCode: "", accountNumber: "", accountName: "", verified: false }
+
+// "GTBank ••••1234" (full number only for admins who record payments).
+function payoutLabel(p: PayoutAccount, full: boolean): string {
+  return `${p.bankName} ${full ? p.accountNumber : `••••${p.accountNumber.slice(-4)}`}`
+}
 
 // WhatsApp needs the international number without "+": 08012345678 and
 // +234 801 234 5678 both become 2348012345678.
@@ -230,8 +239,9 @@ interface CollectorsManagerProps {
 }
 
 export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) {
-  const { profile } = useAdminAuth()
+  const { profile, authFetch } = useAdminAuth()
   const mayDelete = can(profile, "deleteRecords")
+  const mayPay = can(profile, "recordPayments")
   const [collectors, setCollectors] = useState<Collector[]>([])
   const [pickups, setPickups] = useState<CollectorPickup[]>([])
   const [visits, setVisits] = useState<CollectorPickup[]>([])
@@ -251,6 +261,10 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
   const [editing, setEditing] = useState<Collector | null>(null)
   const [form, setForm] = useState<CollectorInput>(EMPTY_FORM)
   const [formError, setFormError] = useState<string | null>(null)
+  const [payout, setPayout] = useState<PayoutAccount>(EMPTY_PAYOUT)
+  const [banks, setBanks] = useState<{ name: string; code: string }[] | null>(null)
+  const [verifying, setVerifying] = useState(false)
+  const [verifyError, setVerifyError] = useState<string | null>(null)
 
   const [deleting, setDeleting] = useState<Collector | null>(null)
 
@@ -351,27 +365,78 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
   const openCreate = () => {
     setEditing(null)
     setForm(EMPTY_FORM)
+    setPayout(EMPTY_PAYOUT)
+    setVerifyError(null)
     setFormError(null)
     setFormOpen(true)
+    loadBanks()
   }
 
   const openEdit = (collector: Collector) => {
     setEditing(collector)
-    setForm({ name: collector.name, phone: collector.phone, area: collector.area, active: collector.active })
+    setForm({ name: collector.name, phone: collector.phone, area: collector.area, active: collector.active, payout: collector.payout })
+    setPayout(collector.payout ?? EMPTY_PAYOUT)
+    setVerifyError(null)
     setFormError(null)
     setFormOpen(true)
+    loadBanks()
+  }
+
+  // Nigerian banks for the payout account (loaded once from the bot server).
+  const loadBanks = () => {
+    if (banks) return
+    authFetch("/api/banks").then((r) => r.json()).then((d) => setBanks(d.banks ?? [])).catch(() => setBanks([]))
+  }
+
+  // Any change to the bank or number means the name must be checked again.
+  const changePayout = (changes: Partial<PayoutAccount>) => {
+    setVerifyError(null)
+    setPayout((p) => ({ ...p, ...changes, ...("bankCode" in changes || "accountNumber" in changes ? { verified: false, accountName: "" } : {}) }))
+  }
+
+  const verifyAccount = async () => {
+    setVerifying(true)
+    setVerifyError(null)
+    try {
+      const res = await authFetch("/api/collectors/resolve-account", {
+        method: "POST",
+        body: JSON.stringify({ bankCode: payout.bankCode, accountNumber: payout.accountNumber }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error)
+      setPayout((p) => ({ ...p, accountName: data.accountName, verified: true }))
+    } catch (err: any) {
+      setVerifyError(err.message || "Could not check the account. Try again.")
+    } finally {
+      setVerifying(false)
+    }
   }
 
   const handleSave = async () => {
+    const accountNumber = payout.accountNumber.replace(/\D/g, "")
+    const hasPayout = Boolean(payout.bankName || accountNumber || payout.accountName)
     const input: CollectorInput = {
       name: form.name.trim(),
       phone: form.phone.trim(),
       area: form.area.trim(),
       active: form.active,
+      payout: hasPayout ? { ...payout, accountNumber, accountName: payout.accountName.trim() } : null,
     }
     if (!input.name) return setFormError("Name is required.")
     if (!/^\+?\d{7,15}$/.test(input.phone.replace(/[\s-]/g, ""))) {
       return setFormError("Enter a valid phone number, e.g. +2348012345678.")
+    }
+    if (hasPayout) {
+      if (!payout.bankName) return setFormError("Choose the collector's bank, or clear the payout account.")
+      if (accountNumber.length !== 10) return setFormError("Account numbers have 10 digits.")
+      if (!payout.accountName.trim()) return setFormError("Tap Verify to get the account name from the bank (or type it if Verify isn't available).")
+    }
+    const before = editing?.payout
+    if (JSON.stringify(before ?? null) !== JSON.stringify(input.payout)) {
+      logActivity(input.payout ? "Changed collector payout account" : "Removed collector payout account", {
+        collection: "collectors", targetId: editing?.id, target: input.name,
+        account: input.payout ? `${input.payout.bankName} ••••${input.payout.accountNumber.slice(-4)}${input.payout.verified ? " (verified)" : ""}` : undefined,
+      })
     }
 
     // Firestore shows the change locally right away but only resolves once the
@@ -596,6 +661,7 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
                     <TableHead>Name</TableHead>
                     <TableHead>Phone</TableHead>
                     <TableHead>Area</TableHead>
+                    <TableHead>Payout account</TableHead>
                     <TableHead>Status</TableHead>
                     <TableHead className="text-right">Open</TableHead>
                     <TableHead className="text-right">Completed</TableHead>
@@ -623,6 +689,21 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
                             </div>
                           ) : (
                             <span className="text-sm text-gray-400">—</span>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          {c.payout ? (
+                            <div className="text-sm">
+                              <div className="flex items-center gap-1">
+                                {payoutLabel(c.payout, mayPay)}
+                                {c.payout.verified && <BadgeCheck className="h-3.5 w-3.5 text-green-700" aria-label="Verified with the bank" />}
+                              </div>
+                              {mayPay && <div className="text-xs text-muted-foreground">{c.payout.accountName}</div>}
+                            </div>
+                          ) : (
+                            mayPay
+                              ? <button type="button" className="text-xs text-muted-foreground hover:underline" onClick={() => openEdit(c)}>+ Add account</button>
+                              : <span className="text-xs text-muted-foreground">—</span>
                           )}
                         </TableCell>
                         <TableCell>
@@ -936,6 +1017,67 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
                 onChange={(e) => setForm({ ...form, area: e.target.value })}
                 placeholder="e.g. Lekki Phase 1"
               />
+            </div>
+            <div className="space-y-3 rounded-lg border p-3">
+              <div className="flex items-center gap-2 text-sm font-medium">
+                <Landmark className="h-4 w-4" /> Payout account <span className="font-normal text-muted-foreground">(optional)</span>
+              </div>
+              {!mayPay ? (
+                <p className="text-sm text-muted-foreground">
+                  {editing?.payout ? `${payoutLabel(editing.payout, false)}. ` : ""}
+                  Only admins who record payments can add or change payout accounts.
+                </p>
+              ) : (
+                <>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="space-y-1.5">
+                      <Label>Bank</Label>
+                      {banks && banks.length > 0 ? (
+                        <Select value={payout.bankCode || undefined}
+                          onValueChange={(code) => changePayout({ bankCode: code, bankName: banks.find((b) => b.code === code)?.name ?? "" })}>
+                          <SelectTrigger className="w-full"><SelectValue placeholder="Choose bank" /></SelectTrigger>
+                          <SelectContent className="max-h-72">
+                            {banks.map((b) => <SelectItem key={b.code} value={b.code}>{b.name}</SelectItem>)}
+                          </SelectContent>
+                        </Select>
+                      ) : (
+                        <Input placeholder={banks ? "e.g. GTBank" : "Loading banks…"} value={payout.bankName}
+                          onChange={(e) => changePayout({ bankName: e.target.value, bankCode: "" })} />
+                      )}
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="payout-number">Account number</Label>
+                      <Input id="payout-number" inputMode="numeric" maxLength={10} placeholder="10 digits" value={payout.accountNumber}
+                        onChange={(e) => changePayout({ accountNumber: e.target.value.replace(/\D/g, "") })} />
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-end gap-2">
+                    <div className="min-w-0 flex-1 space-y-1.5">
+                      <Label htmlFor="payout-name">Account name</Label>
+                      <Input id="payout-name" value={payout.accountName}
+                        readOnly={Boolean(payout.bankCode)}
+                        placeholder={payout.bankCode ? "Tap Verify to get it from the bank" : "As it appears at the bank"}
+                        onChange={(e) => setPayout((p) => ({ ...p, accountName: e.target.value, verified: false }))} />
+                    </div>
+                    {payout.bankCode && (
+                      <Button type="button" variant="outline" disabled={verifying || payout.accountNumber.length !== 10} onClick={verifyAccount}>
+                        {verifying ? "Checking…" : payout.verified ? "Verified" : "Verify"}
+                      </Button>
+                    )}
+                  </div>
+                  {payout.verified && (
+                    <p className="flex items-center gap-1 text-xs text-green-700">
+                      <BadgeCheck className="h-3.5 w-3.5" /> The bank confirmed this name. Check it matches {form.name || "the collector"}.
+                    </p>
+                  )}
+                  {verifyError && <p className="text-xs text-destructive">{verifyError}</p>}
+                  {(payout.bankName || payout.accountNumber) && (
+                    <button type="button" className="text-xs text-muted-foreground hover:underline" onClick={() => { setPayout(EMPTY_PAYOUT); setVerifyError(null) }}>
+                      Clear payout account
+                    </button>
+                  )}
+                </>
+              )}
             </div>
             <div className="flex items-center justify-between rounded-lg border p-3">
               <div>
