@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useMemo, useState } from "react"
+import { CompletionCreditDialog, creditedTo, type CreditJob } from "@/components/completion-credit-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -255,6 +256,7 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
   const [notice, setNotice] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [completing, setCompleting] = useState<CreditJob | null>(null)
 
   const [tab, setTab] = useState("collectors")
   const [collectorFilter, setCollectorFilter] = useState<string>(ALL)
@@ -328,12 +330,14 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
   const statsByCollector = useMemo(() => {
     const stats = new Map<string, { open: number; completed: number; incomplete: number }>()
     for (const p of [...pickups, ...visits]) {
-      if (!p.collectorId) continue
-      const s = stats.get(p.collectorId) ?? { open: 0, completed: 0, incomplete: 0 }
+      // A completed job counts for whoever the admin credited it to.
+      const who = p.status === "completed" ? creditedTo(p) : p.collectorId
+      if (!who) continue
+      const s = stats.get(who) ?? { open: 0, completed: 0, incomplete: 0 }
       if (p.status === "completed") s.completed++
       else if (p.status === "incomplete") s.incomplete++
       else if (p.status !== "cancelled") s.open++
-      stats.set(p.collectorId, s)
+      stats.set(who, s)
     }
     return stats
   }, [pickups, visits])
@@ -473,7 +477,16 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
     if (!ok) setError("Could not update the assignment. Please try again.")
   }
 
+  // Completing asks who actually did the pickup, so credit and pay go to
+  // the right collector (or to no one).
+  const askCredit = (p: CollectorPickup) => setCompleting({
+    collection: p.collection, id: p.id, customerName: p.customerName, status: p.status,
+    collectorId: p.collectorId, collectorName: p.collectorName, creditedCollectorId: p.creditedCollectorId,
+    reportedDone: p.collectorReport?.status === "done", pickup: p,
+  })
+
   const handleStatus = async (pickup: CollectorPickup, status: PickupStatus) => {
+    if (status === "completed" && pickup.status !== "completed" && collectors.length) return askCredit(pickup)
     const ok = await FirebaseService.updatePickupStatus(pickup, status)
     if (!ok) setError("Could not update the pickup status. Please try again.")
   }
@@ -544,6 +557,16 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
             {"★".repeat(p.rating.stars)}{"☆".repeat(5 - p.rating.stars)} customer rating
           </span>
         )}
+        {p.status === "completed" && collectors.length > 0 && (() => {
+          const who = creditedTo(p)
+          const name = who ? (collectors.find((c) => c.id === who)?.name || p.creditedCollectorName || p.collectorName || "Removed collector") : null
+          return (
+            <span className="text-[11px] text-muted-foreground">
+              {name ? `Credited to ${name}` : "Not credited to any collector"}
+              <Button size="sm" variant="link" className="ml-1 h-auto p-0 text-[11px]" onClick={() => askCredit(p)}>Change</Button>
+            </span>
+          )
+        })()}
         {report && !isOpen(p) && <ProofPhoto report={report} compact />}
         {isOpen(p) && (
           <div className="flex flex-wrap items-center gap-1 text-[11px]">
@@ -940,6 +963,8 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
       </Tabs>
 
       {/* ── Reminder settings ──────────────────────────────────────────────── */}
+      <CompletionCreditDialog job={completing} collectors={collectors} onClose={() => setCompleting(null)} onError={setError} />
+
       <Dialog open={!!editingReminders} onOpenChange={(o) => { if (!o) setEditingReminders(null) }}>
         <DialogContent>
           <DialogHeader>

@@ -105,6 +105,9 @@ function normalizeRequest(data: any, id: string): WasteRequest {
     outsideArea:       data.outsideArea === true,
     rating:            data.rating ?? null,
     collectorReport:   data.collectorReport ?? null,
+    collectorId:       data.collectorId ?? null,
+    collectorName:     data.collectorName ?? "",
+    creditedCollectorId: data.creditedCollectorId === undefined ? undefined : data.creditedCollectorId,
     createdAt,
     updatedAt,
   }
@@ -201,6 +204,8 @@ function normalizeCollectorPickup(data: any, id: string, col: CollectorPickup["c
     status:        data.status ?? "pending",
     collectorId:   data.collectorId ?? null,
     collectorName: data.collectorName ?? "",
+    creditedCollectorId: data.creditedCollectorId === undefined ? undefined : data.creditedCollectorId,
+    creditedCollectorName: data.creditedCollectorName ?? undefined,
     timeWindow:    data.timeWindow ?? "",
     location:      data.location ?? null,
     outsideArea:   data.outsideArea === true,
@@ -601,6 +606,30 @@ export class FirebaseService {
       })
       return true
     } catch (err) { console.error("pickup assign failed", err); return false }
+  }
+
+  // Marks a pickup completed (or changes the credit on one already completed)
+  // and records which collector actually did it: credit and pay follow
+  // creditedCollectorId, not the assignment. null = credit no collector.
+  static async completePickup(
+    pickup: CollectorPickup | { collection: PickupCollection; id: string; customerName?: string; status?: string },
+    credit: { id: string; name: string } | null,
+  ): Promise<boolean> {
+    try {
+      const update = {
+        status: "completed",
+        creditedCollectorId: credit?.id ?? null,
+        creditedCollectorName: credit?.name ?? "",
+        updatedAt: new Date().toISOString(),
+      }
+      if (pickup.collection === "subscriptionVisits") await writePickup(pickup as CollectorPickup, update)
+      else await updateDoc(doc(db, pickup.collection, pickup.id), update)
+      logActivity(pickup.status === "completed" ? "Changed completion credit" : "Marked completed", {
+        collection: pickup.collection, targetId: pickup.id, target: pickup.customerName,
+        creditedTo: credit?.name ?? "No collector",
+      })
+      return true
+    } catch (err) { console.error("pickup completion failed", err); return false }
   }
 
   static async updatePickupStatus(pickup: CollectorPickup, status: PickupStatus): Promise<boolean> {

@@ -15,6 +15,7 @@ import { db } from "@/lib/firebase"
 import { logActivity } from "@/lib/activity"
 import { useAdminAuth } from "@/lib/admin-auth"
 import { can } from "@/lib/permissions"
+import { creditedTo } from "@/components/completion-credit-dialog"
 import type { Collector, CollectorPickup } from "@/lib/types"
 
 type Period = "month" | "lastMonth" | "all"
@@ -72,13 +73,20 @@ export function CollectorPerformance({ collectors, jobs }: Props) {
   const rows = useMemo(() => collectors.map((c) => {
     const mine = jobs.filter((j) => j.collectorId === c.id)
     const period = mine.filter(inPeriod)
-    const completed = period.filter((j) => j.status === "completed").length
-    const failed = period.filter((j) => j.status === "incomplete" || (j.collectorReport?.status === "failed" && j.status !== "completed")).length
+    // Completed jobs count for whoever the admin credited (usually the
+    // assigned collector; possibly someone who covered for them).
+    const done = jobs.filter((j) => j.status === "completed" && creditedTo(j) === c.id)
+    const donePeriod = done.filter(inPeriod)
+    const completed = donePeriod.length
+    // Missed: marked incomplete, reported failed, or completed by someone else.
+    const failed = period.filter((j) => j.status === "incomplete"
+      || (j.collectorReport?.status === "failed" && j.status !== "completed")
+      || (j.status === "completed" && creditedTo(j) !== c.id)).length
     const awaiting = mine.filter((j) => j.collectorReport?.status === "done" && ["pending", "assigned", "confirmed"].includes(j.status)).length
     const open = period.filter((j) => ["pending", "assigned", "confirmed"].includes(j.status)).length
-    const ratings = period.map((j) => j.rating?.stars).filter((s): s is number => typeof s === "number")
+    const ratings = donePeriod.map((j) => j.rating?.stars).filter((s): s is number => typeof s === "number")
     // Pay is based on all completed jobs ever, minus everything paid out.
-    const earnedAll = mine.filter((j) => j.status === "completed").length * rate
+    const earnedAll = done.length * rate
     const paidAll = payouts.filter((p) => p.collectorId === c.id).reduce((s, p) => s + p.amount, 0)
     return {
       collector: c,
@@ -176,7 +184,7 @@ export function CollectorPerformance({ collectors, jobs }: Props) {
                 <TableHead>Collector</TableHead>
                 <TableHead className="text-right">Assigned</TableHead>
                 <TableHead className="text-right">Completed</TableHead>
-                <TableHead className="text-right">Failed</TableHead>
+                <TableHead className="text-right" title="Marked incomplete, reported failed, or done by another collector">Missed</TableHead>
                 <TableHead className="text-right">Success</TableHead>
                 <TableHead>Rating</TableHead>
                 {mayPay && <TableHead className="text-right">Earned</TableHead>}

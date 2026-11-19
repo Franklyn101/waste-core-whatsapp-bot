@@ -9,6 +9,10 @@ export interface WasteRequest {
   wasteType: string
   pickupDate: string
   paymentReceiptUrl?: string
+  collectorId?: string | null
+  collectorName?: string
+  creditedCollectorId?: string | null
+  collectorReport?: CollectorReport | null
   status: "pending" | "confirmed" | "completed" | "cancelled"
   createdAt: string // Firestore stores ISO string
   updatedAt: string
@@ -102,6 +106,11 @@ export interface CollectorPickup {
   status: string
   collectorId: string | null
   collectorName: string
+  // Who gets credit (and pay) for a completed job, when the admin chose
+  // someone other than the assigned collector. null = no collector.
+  // Absent = the assigned collector.
+  creditedCollectorId?: string | null
+  creditedCollectorName?: string
   timeWindow?: string
   location?: GeoPin | null
   outsideArea?: boolean
