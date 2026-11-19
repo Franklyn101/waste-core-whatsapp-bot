@@ -66,6 +66,7 @@ function startBot({ seed = {}, env = {} } = {}) {
 
   // ── Fake WhatsApp / Paystack / Cloudinary / web ─────────────────────────
   const sent = [] // every outgoing message, as readable text
+  const templates = [] // { to, name, params } for every template sent
   const uploads = []
   const routes = {}
   const app = {
@@ -95,7 +96,10 @@ function startBot({ seed = {}, env = {} } = {}) {
     axios: {
       post: async (url, body) => {
         if (url.includes("graph.facebook")) {
-          if (body.type === "template") sent.push(`[template ${body.template.name}]`)
+          if (body.type === "template") {
+            sent.push(`[template ${body.template.name}]`)
+            templates.push({ to: body.to, name: body.template.name, params: body.template.components[0].parameters.map((p) => p.text) })
+          }
           else if (body.type === "interactive") {
             const i = body.interactive
             const options = i.type === "button" ? i.action.buttons.map((b) => b.reply.title)
@@ -157,7 +161,7 @@ function startBot({ seed = {}, env = {} } = {}) {
   }
 
   return {
-    store, sent, uploads, routes, runRoute, change, wait,
+    store, sent, templates, uploads, routes, runRoute, change, wait,
     say: (phone, text) => deliver(phone, { type: "text", text: { body: text } }),
     tap: (phone, id, title = id) => deliver(phone, { type: "interactive", interactive: { type: "button_reply", button_reply: { id, title } } }),
     photo: (phone, caption) => deliver(phone, { type: "image", image: { id: `img${messageNo}`, ...(caption ? { caption } : {}) } }),

@@ -30,6 +30,7 @@ import type {
   SubscriptionPayment,
   PaymentInput,
   GeoPin,
+  ReminderSettings,
 } from "./types"
 import { findPlan } from "./subscriptions"
 import { logActivity } from "./activity"
@@ -207,6 +208,7 @@ function normalizeCollectorPickup(data: any, id: string, col: CollectorPickup["c
     planId:        data.planId ?? undefined,
     collectorMessage: data.collectorMessage ?? null,
     collectorReport: data.collectorReport ?? null,
+    customerReminder: data.customerReminder ?? null,
     createdAt:     parseDate(data.createdAt),
   }
 }
@@ -241,6 +243,7 @@ function normalizeSubscriber(data: any, id: string): SubscriptionRow {
     linkedRequestId: data.linkedRequestId ?? null,
     whatsAppConfirmation: data.whatsAppConfirmation ?? null,
     location: data.location ?? null,
+    lastReminder: data.lastReminder ?? null,
     payment: normalizePayment(data),
     renewalReminder: data.renewalReminder ?? null,
     createdAt: parseDate(data.createdAt),
@@ -605,6 +608,45 @@ export class FirebaseService {
       logActivity("Changed status", { collection: pickup.collection, targetId: pickup.id, target: pickup.customerName, status })
       return true
     } catch (err) { console.error("pickup status update failed", err); return false }
+  }
+
+  // Asks the bot to send these customers a pickup reminder now. One-off
+  // pickups are flagged on their own record; a subscription visit on its
+  // subscriber (the visit may not be saved yet).
+  static async requestPickupReminders(pickups: CollectorPickup[]): Promise<boolean> {
+    try {
+      const now = new Date().toISOString()
+      const batch = writeBatch(db)
+      for (const p of pickups) {
+        if (p.collection === "subscriptionVisits") {
+          if (p.subscriberId) batch.update(doc(db, "subscribers", p.subscriberId), { reminderRequest: { date: p.pickupDate, requestedAt: now } })
+        } else {
+          batch.update(doc(db, p.collection, p.id), { reminderRequestedAt: now })
+        }
+      }
+      await batch.commit()
+      logActivity("Sent pickup reminders", { count: pickups.length, target: pickups.map((p) => p.customerName).slice(0, 10).join(", ") })
+      return true
+    } catch (err) { console.error("reminder request failed", err); return false }
+  }
+
+  static subscribeToReminderSettings(callback: (s: ReminderSettings) => void): () => void {
+    return onSnapshot(doc(db, "settings", "pickupReminders"), (snap) => {
+      const d = snap.data() ?? {}
+      callback({
+        enabled: d.enabled !== false,
+        hour: Number.isInteger(d.hour) ? d.hour : 17,
+        tip: d.tip || "Please bag your waste properly, tie the bags and have them ready for the collector.",
+      })
+    }, (err) => console.error("reminder settings error:", err))
+  }
+
+  static async saveReminderSettings(settings: ReminderSettings): Promise<boolean> {
+    try {
+      await setDoc(doc(db, "settings", "pickupReminders"), { ...settings, updatedAt: new Date().toISOString() }, { merge: true })
+      logActivity("Changed pickup reminder settings", { enabled: settings.enabled, hour: settings.hour, tip: settings.tip })
+      return true
+    } catch (err) { console.error("reminder settings save failed", err); return false }
   }
 
   // Saved subscription visits (one document per subscriber per day).

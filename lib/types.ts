@@ -52,6 +52,19 @@ export interface GeoPin {
   address?: string
 }
 
+export interface PickupReminder {
+  status: string // sending | template | text | failed | invalid_phone
+  date: string // the pickup date it was for
+  at?: string
+  auto?: boolean
+}
+
+export interface ReminderSettings {
+  enabled: boolean
+  hour: number
+  tip: string
+}
+
 export interface CollectorReport {
   status: "done" | "failed"
   at: string
@@ -91,6 +104,8 @@ export interface CollectorPickup {
   // What the collector reported on WhatsApp (DONE / FAILED), for the admin
   // to confirm.
   collectorReport?: CollectorReport | null
+  // Last pickup reminder sent to the customer (automatic or from the dashboard).
+  customerReminder?: PickupReminder | null
   createdAt: Date
 }
 
@@ -127,6 +142,8 @@ export interface SubscriptionRow extends SubscriberInput {
   // bot sets these for WhatsApp payments, admins record the rest.
   payment: SubscriptionPayment
   location?: GeoPin | null
+  // Last pickup reminder (subscribers), see PickupReminder.
+  lastReminder?: PickupReminder | null
   // Outcome of the last "Send renewal reminder".
   renewalReminder?: { status: string; at?: string; requestedAt?: string } | null
   createdAt: Date
