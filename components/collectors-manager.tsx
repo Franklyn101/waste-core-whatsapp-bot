@@ -241,7 +241,10 @@ interface CollectorsManagerProps {
 export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) {
   const { profile, authFetch } = useAdminAuth()
   const mayDelete = can(profile, "deleteRecords")
-  const mayPay = can(profile, "recordPayments")
+  // Collector payouts: bank accounts and full numbers. Edit collectors:
+  // register and change their details.
+  const mayPay = can(profile, "collectorPayouts")
+  const mayEdit = can(profile, "editCollectors")
   const [collectors, setCollectors] = useState<Collector[]>([])
   const [pickups, setPickups] = useState<CollectorPickup[]>([])
   const [visits, setVisits] = useState<CollectorPickup[]>([])
@@ -649,9 +652,11 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
             <CardHeader>
               <CardTitle className="flex items-center justify-between">
                 <span>Collectors ({visibleCollectors.length})</span>
-                <Button size="sm" onClick={openCreate}>
-                  <UserPlus className="w-4 h-4 mr-2" /> Register collector
-                </Button>
+                {mayEdit && (
+                  <Button size="sm" onClick={openCreate}>
+                    <UserPlus className="w-4 h-4 mr-2" /> Register collector
+                  </Button>
+                )}
               </CardTitle>
             </CardHeader>
             <CardContent>
@@ -725,9 +730,11 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
                               <DropdownMenuItem onClick={() => viewPickups(c.id)}>
                                 <ClipboardList className="w-4 h-4 mr-2" /> View pickups
                               </DropdownMenuItem>
-                              <DropdownMenuItem onClick={() => openEdit(c)}>
-                                <Pencil className="w-4 h-4 mr-2" /> Edit
-                              </DropdownMenuItem>
+                              {(mayEdit || mayPay) && (
+                                <DropdownMenuItem onClick={() => openEdit(c)}>
+                                  <Pencil className="w-4 h-4 mr-2" /> {mayEdit ? "Edit" : "Payout account"}
+                                </DropdownMenuItem>
+                              )}
                               {mayDelete && (
                                 <DropdownMenuItem className="text-destructive" onClick={() => setDeleting(c)}>
                                   <Trash2 className="w-4 h-4 mr-2" /> Delete
@@ -995,6 +1002,7 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
               <Label htmlFor="collector-name">Full name</Label>
               <Input
                 id="collector-name"
+                disabled={!mayEdit}
                 value={form.name}
                 onChange={(e) => setForm({ ...form, name: e.target.value })}
                 placeholder="e.g. Musa Ibrahim"
@@ -1004,6 +1012,7 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
               <Label htmlFor="collector-phone">WhatsApp number</Label>
               <Input
                 id="collector-phone"
+                disabled={!mayEdit}
                 value={form.phone}
                 onChange={(e) => setForm({ ...form, phone: e.target.value })}
                 placeholder="+2348012345678"
@@ -1013,6 +1022,7 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
               <Label htmlFor="collector-area">Area / zone</Label>
               <Input
                 id="collector-area"
+                disabled={!mayEdit}
                 value={form.area}
                 onChange={(e) => setForm({ ...form, area: e.target.value })}
                 placeholder="e.g. Lekki Phase 1"
@@ -1025,7 +1035,7 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
               {!mayPay ? (
                 <p className="text-sm text-muted-foreground">
                   {editing?.payout ? `${payoutLabel(editing.payout, false)}. ` : ""}
-                  Only admins who record payments can add or change payout accounts.
+                  Only admins with the &quot;Collector payouts&quot; permission can add or change payout accounts.
                 </p>
               ) : (
                 <>
@@ -1086,6 +1096,7 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
               </div>
               <Switch
                 id="collector-active"
+                disabled={!mayEdit}
                 checked={form.active}
                 onCheckedChange={(checked) => setForm({ ...form, active: checked })}
               />

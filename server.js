@@ -3913,7 +3913,7 @@ nextApp.prepare().then(() => {
   })
 
   // Sub-admin permission switches (must match lib/permissions.ts).
-  const SUB_ADMIN_PERMISSIONS = ["viewRevenue", "recordPayments", "deleteRecords", "sendBroadcasts"]
+  const SUB_ADMIN_PERMISSIONS = ["viewRevenue", "recordPayments", "deleteRecords", "sendBroadcasts", "collectorPayouts", "editCollectors"]
 
   // Activity log entries for actions taken through the server.
   async function logAdminActivity(uid, action, details = {}) {

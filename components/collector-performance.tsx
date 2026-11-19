@@ -44,7 +44,7 @@ interface Props {
 
 export function CollectorPerformance({ collectors, jobs }: Props) {
   const { profile } = useAdminAuth()
-  const mayPay = can(profile, "recordPayments")
+  const mayPay = can(profile, "collectorPayouts")
   const [period, setPeriod] = useState<Period>("month")
   const [rate, setRate] = useState<number>(0)
   const [rateDraft, setRateDraft] = useState("")
