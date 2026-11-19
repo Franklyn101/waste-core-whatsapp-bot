@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useEffect } from "react"
+import { CompletionCreditDialog, useCollectors, type CreditJob } from "@/components/completion-credit-dialog"
 import { Badge } from "@/components/ui/badge"
 import { PaystackPaidBadge } from "@/components/paystack-paid-badge"
 import { Button } from "@/components/ui/button"
@@ -117,6 +118,18 @@ export function PickupRequestsTable({ searchQuery = "" }: PickupRequestsTablePro
     return "bg-muted text-muted-foreground"
   }
 
+  const collectors = useCollectors()
+  const [completing, setCompleting] = useState<CreditJob | null>(null)
+  // Marking completed asks which collector did it (credit and pay).
+  const markCompleted = (request: WasteRequest) => {
+    if (!collectors.length) return handleStatusUpdate(request.id, "completed")
+    setCompleting({
+      collection: "pickupRequests", id: request.id, customerName: request.customerName, status: request.status,
+      collectorId: request.collectorId ?? null, collectorName: request.collectorName ?? "",
+      creditedCollectorId: request.creditedCollectorId, reportedDone: request.collectorReport?.status === "done",
+    })
+  }
+
   const handleStatusUpdate = async (requestId: string, newStatus: string) => {
     await FirebaseService.updateRequestStatus(requestId, newStatus)
   }
@@ -150,6 +163,7 @@ export function PickupRequestsTable({ searchQuery = "" }: PickupRequestsTablePro
 
   return (
     <div className="space-y-6">
+      <CompletionCreditDialog job={completing} collectors={collectors} onClose={() => setCompleting(null)} onError={(m) => alert(m)} />
       <AdvancedFilters
         filters={filters}
         onFiltersChange={setFilters}
@@ -282,7 +296,7 @@ export function PickupRequestsTable({ searchQuery = "" }: PickupRequestsTablePro
                         <DropdownMenuItem onClick={() => handleStatusUpdate(request.id, "assigned")}>
                           Mark as Assigned
                         </DropdownMenuItem>
-                        <DropdownMenuItem onClick={() => handleStatusUpdate(request.id, "completed")}>
+                        <DropdownMenuItem onClick={() => markCompleted(request)}>
                           Mark as Completed
                         </DropdownMenuItem>
                         <DropdownMenuItem onClick={() => handleStatusUpdate(request.id, "cancelled")}>
