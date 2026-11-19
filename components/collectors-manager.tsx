@@ -49,6 +49,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import {
   AlertCircle,
+  BellRing,
   Calendar,
   CheckCircle2,
   ClipboardList,
@@ -68,7 +69,8 @@ import { ProofPhoto } from "@/components/proof-photo"
 import { useAdminAuth } from "@/lib/admin-auth"
 import { can } from "@/lib/permissions"
 import { WEEK_DAYS, findPlan, planFullLabel } from "@/lib/subscriptions"
-import type { Collector, CollectorInput, CollectorPickup, PickupStatus, SubscriptionRow } from "@/lib/types"
+import type { Collector, CollectorInput, CollectorPickup, PickupStatus, ReminderSettings, SubscriptionRow } from "@/lib/types"
+import { Textarea } from "@/components/ui/textarea"
 import { MapPinLink, mapPinUrl } from "@/components/map-pin-link"
 
 const UNASSIGNED = "__unassigned__"
@@ -156,7 +158,10 @@ function visitsForDate(date: string, subscribers: SubscriptionRow[], saved: Coll
     .map((s): CollectorPickup => {
       const id = `${s.id}_${date}`
       const plan = findPlan(s.planId)
-      return savedById.get(id) ?? {
+      const reminder = s.lastReminder?.date === date ? s.lastReminder : null
+      const saved = savedById.get(id)
+      if (saved) return { ...saved, customerReminder: reminder }
+      return {
         id,
         collection: "subscriptionVisits",
         subscriberId: s.id,
@@ -174,6 +179,7 @@ function visitsForDate(date: string, subscribers: SubscriptionRow[], saved: Coll
         collectorId: null,
         collectorName: "",
         collectorMessage: null,
+        customerReminder: reminder,
         createdAt: new Date(0),
       }
     })
@@ -181,6 +187,25 @@ function visitsForDate(date: string, subscribers: SubscriptionRow[], saved: Coll
   const dueIds = new Set(due.map((v) => v.id))
   const extra = [...savedById.values()].filter((v) => !dueIds.has(v.id))
   return [...due, ...extra].sort((a, b) => (a.timeWindow ?? "").localeCompare(b.timeWindow ?? "") || a.customerName.localeCompare(b.customerName))
+}
+
+// The pickup reminder customers get (automatically or from here).
+const REMINDER_STATUS: Record<string, { text: string; className: string }> = {
+  sending: { text: "Sending reminder…", className: "text-muted-foreground" },
+  template: { text: "🔔 Reminder sent", className: "text-green-700" },
+  text: { text: "🔔 Reminder sent as plain message", className: "text-amber-700" },
+  failed: { text: "Reminder not sent", className: "text-destructive" },
+  invalid_phone: { text: "Reminder not sent: invalid number", className: "text-destructive" },
+}
+
+function hourLabel(h: number): string {
+  return `${h % 12 || 12}${h < 12 ? "am" : "pm"}`
+}
+
+function reminderPreview(tip: string, date: string): string {
+  const today = isoDate(new Date())
+  const day = date === today ? "today" : date === addDaysIso(today, 1) ? "tomorrow" : new Date(`${date}T00:00:00`).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" })
+  return `Hello Ada, a reminder that your WasteCore pickup is ${day}, Morning (8am-12pm), at 12 Okaka Road. ${tip} Reply HI if you need to make a change.`
 }
 
 // What happened to the bot's WhatsApp message to the collector.
@@ -212,6 +237,9 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
   const [visits, setVisits] = useState<CollectorPickup[]>([])
   const [subscribers, setSubscribers] = useState<SubscriptionRow[]>([])
   const [visitDate, setVisitDate] = useState(() => isoDate(new Date()))
+  const [reminderSettings, setReminderSettings] = useState<ReminderSettings>({ enabled: true, hour: 17, tip: "" })
+  const [editingReminders, setEditingReminders] = useState<ReminderSettings | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -256,6 +284,28 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
   }, [])
 
   const dayVisits = useMemo(() => visitsForDate(visitDate, subscribers, visits), [visitDate, subscribers, visits])
+
+  useEffect(() => FirebaseService.subscribeToReminderSettings(setReminderSettings), [])
+
+  // Everyone with an open pickup on the chosen day (subscriptions and one-off).
+  const dayRemindable = [...dayVisits, ...pickups.filter((p) => p.pickupDate === visitDate)].filter((p) => isOpen(p))
+
+  const sendReminders = async (targets: CollectorPickup[]) => {
+    if (!targets.length) return
+    const ok = await FirebaseService.requestPickupReminders(targets)
+    if (!ok) return setError("Could not send the reminders. Please try again.")
+    setNotice(`Sending ${targets.length} reminder${targets.length === 1 ? "" : "s"}…`)
+    setTimeout(() => setNotice(null), 5000)
+  }
+
+  const saveReminderSettings = async () => {
+    if (!editingReminders) return
+    const tip = editingReminders.tip.replace(/\s+/g, " ").trim()
+    if (tip.length < 5) return setError("Write a short message for customers, e.g. how to bag their waste.")
+    const ok = await FirebaseService.saveReminderSettings({ ...editingReminders, tip })
+    if (!ok) return setError("Could not save the reminder settings. Check that the Firestore rule for settings is published.")
+    setEditingReminders(null)
+  }
   const today = isoDate(new Date())
 
   const statsByCollector = useMemo(() => {
@@ -427,6 +477,21 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
           </span>
         )}
         {report && !isOpen(p) && <ProofPhoto report={report} compact />}
+        {isOpen(p) && (
+          <div className="flex flex-wrap items-center gap-1 text-[11px]">
+            {p.customerReminder && p.customerReminder.date === p.pickupDate && REMINDER_STATUS[p.customerReminder.status] && (
+              <span className={REMINDER_STATUS[p.customerReminder.status].className} title={p.customerReminder.at ? new Date(p.customerReminder.at).toLocaleString("en-NG") : undefined}>
+                {REMINDER_STATUS[p.customerReminder.status].text}{p.customerReminder.auto ? " (auto)" : ""}
+              </span>
+            )}
+            {p.customerReminder?.status !== "sending" && (
+              <Button size="sm" variant="ghost" className="h-6 px-1.5 text-[11px]" onClick={() => sendReminders([p])}>
+                <BellRing className="mr-1 h-3 w-3" />
+                {p.customerReminder?.date === p.pickupDate ? "Remind again" : "Send reminder"}
+              </Button>
+            )}
+          </div>
+        )}
         {report && isOpen(p) && (
           <div className="max-w-44 text-[11px]">
             {report.status === "done" ? (
@@ -608,6 +673,27 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
         {/* ── Pickup assignment ───────────────────────────────────────────── */}
         <TabsContent value="pickups" className="space-y-6">
           <Card>
+            <CardContent className="flex flex-wrap items-start justify-between gap-3 py-4">
+              <div className="min-w-0 flex-1 space-y-1 text-sm">
+                <div className="flex items-center gap-2 font-medium">
+                  <BellRing className="h-4 w-4 text-primary" /> Pickup reminders
+                  <Badge className={reminderSettings.enabled ? "bg-green-100 text-green-800" : "bg-gray-100 text-gray-600"}>
+                    {reminderSettings.enabled ? `Automatic at ${hourLabel(reminderSettings.hour)} the day before` : "Automatic off"}
+                  </Badge>
+                </div>
+                <p className="text-muted-foreground">
+                  Customers see: <i>{reminderPreview(reminderSettings.tip, addDaysIso(today, 1))}</i>
+                </p>
+              </div>
+              <Button size="sm" variant="outline" onClick={() => setEditingReminders({ ...reminderSettings })}>
+                <Pencil className="mr-1 h-4 w-4" /> Edit
+              </Button>
+            </CardContent>
+          </Card>
+
+          {notice && <div className="rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-green-800">{notice}</div>}
+
+          <Card>
             <CardHeader>
               <CardTitle className="flex flex-wrap items-center justify-between gap-3">
                 <span>
@@ -632,6 +718,10 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
                     onChange={(e) => e.target.value && setVisitDate(e.target.value)}
                     aria-label="Visit date"
                   />
+                  <Button size="sm" variant="outline" disabled={!dayRemindable.length} onClick={() => sendReminders(dayRemindable)}
+                    title="Subscription and one-off pickups still open on this day">
+                    <BellRing className="mr-1 h-4 w-4" /> Remind everyone ({dayRemindable.length})
+                  </Button>
                 </div>
               </CardTitle>
             </CardHeader>
@@ -760,6 +850,52 @@ export function CollectorsManager({ searchQuery = "" }: CollectorsManagerProps) 
           <CollectorPerformance collectors={collectors} jobs={[...pickups, ...visits]} />
         </TabsContent>
       </Tabs>
+
+      {/* ── Reminder settings ──────────────────────────────────────────────── */}
+      <Dialog open={!!editingReminders} onOpenChange={(o) => { if (!o) setEditingReminders(null) }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Pickup reminders</DialogTitle>
+            <DialogDescription>A WhatsApp reminder the day before each pickup, with your message about getting the waste ready.</DialogDescription>
+          </DialogHeader>
+          {editingReminders && (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between rounded-lg border p-3">
+                <div>
+                  <Label htmlFor="rem-on">Send automatically</Label>
+                  <p className="text-xs text-muted-foreground">Every customer with a pickup the next day.</p>
+                </div>
+                <Switch id="rem-on" checked={editingReminders.enabled}
+                  onCheckedChange={(v) => setEditingReminders({ ...editingReminders, enabled: v })} />
+              </div>
+              <div className="space-y-2">
+                <Label>Send at (Nigerian time)</Label>
+                <Select value={String(editingReminders.hour)} onValueChange={(v) => setEditingReminders({ ...editingReminders, hour: Number(v) })}>
+                  <SelectTrigger className="w-40"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {[12, 13, 14, 15, 16, 17, 18, 19, 20].map((h) => <SelectItem key={h} value={String(h)}>{hourLabel(h)}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="rem-tip">Your message to customers</Label>
+                <Textarea id="rem-tip" rows={3} maxLength={300} value={editingReminders.tip}
+                  placeholder="e.g. Please bag your waste properly, tie the bags and put them outside your gate by 8am."
+                  onChange={(e) => setEditingReminders({ ...editingReminders, tip: e.target.value })} />
+                <p className="text-xs text-muted-foreground">{editingReminders.tip.length}/300</p>
+              </div>
+              <div className="rounded-lg bg-muted p-3 text-xs">
+                <div className="mb-1 font-medium">Preview</div>
+                {reminderPreview(editingReminders.tip.replace(/\s+/g, " ").trim(), addDaysIso(today, 1))}
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditingReminders(null)}>Cancel</Button>
+            <Button onClick={saveReminderSettings}>Save</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* ── Create / edit dialog ──────────────────────────────────────────── */}
       <Dialog open={formOpen} onOpenChange={setFormOpen}>

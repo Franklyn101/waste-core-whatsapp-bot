@@ -402,6 +402,9 @@ function setupStatusListeners() {
           if (change.type !== "removed" && RECEIPT_BOOKING_COLLECTIONS.includes(collectionName)) {
             await issueBookingReceipt(collectionName, change.doc)
           }
+          if (change.type !== "removed" && (collectionName === "instantPickups" || collectionName === "pickupRequests")) {
+            await sendRequestedReminder(collectionName, change.doc)
+          }
 
           // Record the current status on existing/new docs without notifying,
           // so later non-status edits don't look like a status change.
@@ -1385,7 +1388,74 @@ const cutoffLabel = () => {
 //          {{2}}, at {{3}}. Please have your waste bagged and ready.
 //          Reply HI if you need to make a change."
 const TEMPLATE_PICKUP_REMINDER = process.env.WAPI_TEMPLATE_PICKUP_REMINDER || "pickup_reminder"
+// Newer template that also carries the admin's tip (Utility):
+//   name: "pickup_reminder_tip"
+//   body: "Hello {{1}}, a reminder that your WasteCore pickup is {{2}}, at {{3}}.
+//          {{4}} Reply HI if you need to make a change."
+const TEMPLATE_PICKUP_REMINDER_TIP = process.env.WAPI_TEMPLATE_PICKUP_REMINDER_TIP || "pickup_reminder_tip"
 const PICKUP_REMINDER_HOUR = Number(process.env.PICKUP_REMINDER_HOUR || 17) // Nigerian time
+const DEFAULT_REMINDER_TIP = "Please bag your waste properly, tie the bags and have them ready for the collector."
+
+// Admin settings from the dashboard (settings/pickupReminders): automatic
+// reminders on/off, the hour they go out, and the tip added to every one.
+async function reminderSettings() {
+  const data = (await db.collection("settings").doc("pickupReminders").get().catch(() => null))?.data?.() || {}
+  const hour = Number(data.hour)
+  return {
+    enabled: data.enabled !== false,
+    hour: Number.isInteger(hour) && hour >= 6 && hour <= 21 ? hour : PICKUP_REMINDER_HOUR,
+    tip: String(data.tip || DEFAULT_REMINDER_TIP).replace(/\s+/g, " ").trim().slice(0, 300),
+  }
+}
+
+// One pickup reminder: the template with the tip, else the older template
+// (its text says "tomorrow"), else a plain message. Returns the outcome.
+async function sendPickupReminder(phone, { name, date, timeWindow, address }, tip) {
+  const to = toWhatsAppId(phone)
+  if (!to) return "invalid_phone"
+  const who = String(name || "").trim() || "there"
+  const when = `${shortDay(date)}${timeWindow ? `, ${timeWindow}` : ""}`
+  const today = lagosToday()
+  const day = date === today ? `today, ${when}` : date === addDays(today, 1) ? `tomorrow, ${when}` : when
+  if (await sendMetaTemplate(to, TEMPLATE_PICKUP_REMINDER_TIP, [who, day, address || "your address", tip])) return "template"
+  if (date === addDays(today, 1) && await sendMetaTemplate(to, TEMPLATE_PICKUP_REMINDER, [who, when, address || "your address"])) return "template"
+  const text = [
+    `\u23F0 *Pickup reminder*`,
+    "",
+    `Hello ${who}, your WasteCore pickup is *${day}*.`,
+    ...(address ? [`\u{1F4CD} ${address}`] : []),
+    "",
+    `\u{1F5D1} ${tip}`,
+    "",
+    "Reply *hi* if you need to make a change.",
+  ].join("\n")
+  return (await sendWhatsAppMessage(to, text)) ? "text" : "failed"
+}
+
+// "Send reminder" on the dashboard: one-off pickups get reminderRequestedAt,
+// subscribers get reminderRequest { date, requestedAt }. Each request is
+// sent once and the outcome stored for the dashboard.
+async function sendRequestedReminder(collectionName, docSnap) {
+  const data = docSnap.data()
+  const isSubscriber = collectionName === "subscribers"
+  const request = isSubscriber ? data.reminderRequest : data.reminderRequestedAt && { date: data.pickupDate, requestedAt: data.reminderRequestedAt }
+  const record = isSubscriber ? data.lastReminder : data.customerReminder
+  if (!request?.requestedAt || !request.date || record?.requestedAt === request.requestedAt) return
+  const field = isSubscriber ? "lastReminder" : "customerReminder"
+  try {
+    await docSnap.ref.update({ [field]: { status: "sending", date: request.date, requestedAt: request.requestedAt } }, { lastUpdateTime: docSnap.updateTime })
+  } catch {
+    return
+  }
+  const { tip } = await reminderSettings()
+  const status = await sendPickupReminder(data.customerPhone, {
+    name: data.customerName,
+    date: request.date,
+    timeWindow: isSubscriber ? SUBSCRIPTION_TIME_WINDOWS[data.timeWindow] : data.timeWindow,
+    address: data.address,
+  }, tip).catch(() => "failed")
+  await docSnap.ref.update({ [field]: { status, date: request.date, requestedAt: request.requestedAt, at: new Date().toISOString() } })
+}
 // Automatic renewal reminder this many days before paidUntil (0 turns it off).
 const AUTO_RENEWAL_DAYS_BEFORE = Number(process.env.AUTO_RENEWAL_DAYS_BEFORE ?? 3)
 const WEEKDAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
@@ -1443,15 +1513,18 @@ async function sendAutomaticRenewalReminders() {
 }
 
 async function sendPickupReminders() {
-  await oncePerDay("pickupReminders", PICKUP_REMINDER_HOUR, 21, async (today) => {
+  const settings = await reminderSettings()
+  if (!settings.enabled) return
+  await oncePerDay("pickupReminders", settings.hour, 21, async (today) => {
     const tomorrow = addDays(today, 1)
     const weekday = WEEKDAY_NAMES[new Date(`${tomorrow}T00:00:00Z`).getUTCDay()]
-    // phone -> { name, when, address }; one reminder per customer.
+    // phone -> pickup; one reminder per customer, and none for pickups an
+    // admin already sent a reminder for.
     const due = new Map()
-    const add = (phone, name, timeWindow, address) => {
+    const add = (phone, pickup, record) => {
       const id = toWhatsAppId(phone)
       if (!id || due.has(id)) return
-      due.set(id, { name, when: `${shortDay(tomorrow)}${timeWindow ? `, ${timeWindow}` : ""}`, address })
+      due.set(id, { ...pickup, record })
     }
 
     const [scheduled, instant] = await Promise.all([
@@ -1460,7 +1533,8 @@ async function sendPickupReminders() {
     ])
     for (const d of [...scheduled.docs, ...instant.docs]) {
       const job = d.data()
-      if (OPEN_JOB_STATUSES.includes(job.status)) add(job.customerPhone, job.customerName, job.timeWindow, job.address)
+      if (!OPEN_JOB_STATUSES.includes(job.status) || job.customerReminder?.date === tomorrow) continue
+      add(job.customerPhone, { name: job.customerName, timeWindow: job.timeWindow, address: job.address }, { ref: d.ref, field: "customerReminder" })
     }
     for (const sub of await activeSubscriptions()) {
       const s = sub.data
@@ -1468,25 +1542,14 @@ async function sendPickupReminders() {
       if (!Array.isArray(s.pickupDays) || !s.pickupDays.includes(weekday)) continue
       if (s.startDate && s.startDate > tomorrow) continue
       if (s.paidUntil && s.paidUntil < tomorrow) continue // expired: the renewal reminder covers it
-      add(s.customerPhone, s.customerName, SUBSCRIPTION_TIME_WINDOWS[s.timeWindow], s.address)
+      if (s.lastReminder?.date === tomorrow) continue
+      add(s.customerPhone, { name: s.customerName, timeWindow: SUBSCRIPTION_TIME_WINDOWS[s.timeWindow], address: s.address }, { ref: sub.ref, field: "lastReminder" })
     }
 
     let sent = 0
     for (const [phone, r] of due) {
-      const name = String(r.name || "").trim() || "there"
-      const status = await notifyCustomer(
-        phone,
-        TEMPLATE_PICKUP_REMINDER,
-        [name, r.when, r.address || "your address"],
-        [
-          `\u23F0 *Pickup reminder*`,
-          "",
-          `Hello ${name}, your WasteCore pickup is *tomorrow, ${r.when}*.`,
-          ...(r.address ? [`\u{1F4CD} ${r.address}`] : []),
-          "",
-          "Please have your waste bagged and ready. Reply *hi* if you need to make a change.",
-        ].join("\n")
-      )
+      const status = await sendPickupReminder(phone, { ...r, date: tomorrow }, settings.tip)
+      await r.record.ref.update({ [r.record.field]: { status, date: tomorrow, auto: true, at: new Date().toISOString() } }).catch(() => {})
       if (status !== "failed") sent++
     }
     console.log(`Pickup reminders sent to ${sent} of ${due.size} customer(s) for ${tomorrow}`)
@@ -1583,6 +1646,8 @@ function setupSubscriberWelcome() {
           .catch((err) => console.error(`Renewal reminder failed for subscribers/${change.doc.id}:`, err))
         await issueSubscriptionReceipts("subscribers", change.doc, isInitial)
           .catch((err) => console.error(`Receipt failed for subscribers/${change.doc.id}:`, err))
+        await sendRequestedReminder("subscribers", change.doc)
+          .catch((err) => console.error(`Reminder failed for subscribers/${change.doc.id}:`, err))
         const data = change.doc.data()
         if (data.sendWhatsAppConfirmation !== true || data.whatsAppConfirmation || data.status !== "active") return
         try {
