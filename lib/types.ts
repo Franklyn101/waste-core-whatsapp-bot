@@ -36,11 +36,22 @@ export interface Collector {
   phone: string
   area: string
   active: boolean
+  // Bank account their pickup earnings are paid into.
+  payout: PayoutAccount | null
   createdAt: Date
   updatedAt: Date
 }
 
-export type CollectorInput = Pick<Collector, "name" | "phone" | "area" | "active">
+export interface PayoutAccount {
+  bankName: string
+  bankCode: string // Paystack bank code ("" if typed by hand)
+  accountNumber: string
+  accountName: string
+  // The bank confirmed accountName for this number (via Paystack).
+  verified: boolean
+}
+
+export type CollectorInput = Pick<Collector, "name" | "phone" | "area" | "active" | "payout">
 
 export type PickupCollection = "instantPickups" | "pickupRequests"
 

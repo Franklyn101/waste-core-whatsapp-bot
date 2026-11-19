@@ -3823,7 +3823,7 @@ nextApp.prepare().then(() => {
   }, 15 * 60 * 1000).unref()
   // Also the public payment pages, which call Paystack (not the webhook,
   // which Paystack signs and may send in bursts).
-  app.use(["/api/admin-auth/setup", "/api/sub-admins", "/api/push", "/api/broadcasts", "/api/backups", "/paystack/callback", "/renew"], rateLimit)
+  app.use(["/api/admin-auth/setup", "/api/sub-admins", "/api/push", "/api/broadcasts", "/api/backups", "/api/collectors", "/paystack/callback", "/renew"], rateLimit)
 
   const ADMIN_EMAIL_DOMAIN = "admins.wastecore.local"
   const USERNAME_RE = /^[a-z0-9._-]{3,30}$/
@@ -3913,7 +3913,7 @@ nextApp.prepare().then(() => {
   })
 
   // Sub-admin permission switches (must match lib/permissions.ts).
-  const SUB_ADMIN_PERMISSIONS = ["viewRevenue", "recordPayments", "deleteRecords", "sendBroadcasts"]
+  const SUB_ADMIN_PERMISSIONS = ["viewRevenue", "recordPayments", "deleteRecords", "sendBroadcasts", "collectorPayouts", "editCollectors"]
 
   // Activity log entries for actions taken through the server.
   async function logAdminActivity(uid, action, details = {}) {
@@ -3948,6 +3948,54 @@ nextApp.prepare().then(() => {
     if (data.role === "main" || data.permissions?.[permission] === true) return next()
     res.status(403).json({ error: "You don't have permission to do this. Ask the main admin." })
   }
+
+  // ── Collector payout accounts ─────────────────────────────────────────────
+  // Nigerian banks (from Paystack, cached for a day) and account-name checks,
+  // so a collector's payout account is confirmed before anyone pays into it.
+  let bankCache = { at: 0, list: [] }
+  app.get("/api/banks", requireAdmin, async (req, res) => {
+    if (!paystackEnabled()) return res.json({ banks: [] })
+    try {
+      if (Date.now() - bankCache.at > 24 * 60 * 60 * 1000 || !bankCache.list.length) {
+        const r = await axios.get(`${PAYSTACK_API}/bank`, {
+          params: { country: "nigeria", currency: "NGN", perPage: 100 },
+          headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` }, timeout: 15000,
+        })
+        const banks = (r.data?.data || [])
+          .filter((b) => b.active !== false && !b.is_deleted)
+          .map((b) => ({ name: b.name, code: b.code }))
+          .sort((a, b) => a.name.localeCompare(b.name))
+        bankCache = { at: Date.now(), list: banks }
+      }
+      res.json({ banks: bankCache.list })
+    } catch (err) {
+      console.error("Bank list failed:", err.response?.data || err.message)
+      res.json({ banks: [] })
+    }
+  })
+
+  // { bankCode, accountNumber } -> { accountName } from the bank, via Paystack.
+  app.post("/api/collectors/resolve-account", requireAdmin, async (req, res) => {
+    const accountNumber = String(req.body?.accountNumber || "").replace(/\D/g, "")
+    const bankCode = String(req.body?.bankCode || "").trim()
+    if (accountNumber.length !== 10) return res.status(400).json({ error: "Account numbers have 10 digits." })
+    if (!/^[A-Za-z0-9]{2,12}$/.test(bankCode)) return res.status(400).json({ error: "Choose the bank." })
+    if (!paystackEnabled()) return res.status(503).json({ error: "Account checks need Paystack to be set up." })
+    try {
+      const r = await axios.get(`${PAYSTACK_API}/bank/resolve`, {
+        params: { account_number: accountNumber, bank_code: bankCode },
+        headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` }, timeout: 15000,
+      })
+      const accountName = r.data?.data?.account_name
+      if (!accountName) return res.status(404).json({ error: "The bank didn't return a name for this account." })
+      res.json({ accountName })
+    } catch (err) {
+      const status = err.response?.status
+      res.status(status === 422 || status === 400 ? 404 : 502).json({
+        error: status === 422 || status === 400 ? "Account not found. Check the number and bank." : "Couldn't reach the bank right now. Try again.",
+      })
+    }
+  })
 
   // ── Backups (main admin only) ─────────────────────────────────────────────
   app.get("/api/backups", requireMainAdmin, async (req, res) => {
